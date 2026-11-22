@@ -280,13 +280,13 @@ footer{text-align:center;color:var(--mute);font-size:12px;margin-top:18px;opacit
 </div>
 </main>
 
-<script>
-const CHUNK = 16 * 1024;
+<script type="module">
+import { ReliableTransfer } from './robust-transfer.js';
 const $ = id => document.getElementById(id);
 const ICON = '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#0e0b2b" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>';
 document.querySelectorAll('.ic').forEach(e => e.innerHTML = ICON);
 
-const fmt = n => n >= 1e9 ? (n/1e9).toFixed(2)+' Go' : n >= 1e6 ? (n/1e6).toFixed(1)+' Mo' : Math.max(1,Math.round(n/1e3))+' Ko';
+const fmt = n => n === 0 ? '0 o' : n >= 1e9 ? (n/1e9).toFixed(2)+' Go' : n >= 1e6 ? (n/1e6).toFixed(1)+' Mo' : Math.max(1,Math.round(n/1e3))+' Ko';
 const fmtT = s => !isFinite(s) ? '–' : s < 60 ? Math.ceil(s)+' s' : Math.floor(s/60)+' min '+String(Math.ceil(s%60)).padStart(2,'0');
 const show = v => { document.querySelectorAll('.view').forEach(e => e.hidden = e.id !== 'v-' + v); const home = v === 'pick' || v === 'pc' || v === 'link'; $('histcard').hidden = !home; $('modes').hidden = !home; };
 const setChip = (name, size, extra) => { document.querySelectorAll('.fn').forEach(e => e.textContent = name); document.querySelectorAll('.fs').forEach(e => e.textContent = (extra ? extra + ' · ' : '') + fmt(size)); };
@@ -296,7 +296,7 @@ const keepAwake = async () => { try { await navigator.wakeLock.request('screen')
 let t0 = 0;
 function progress(done, total) {
   if (!t0) t0 = performance.now();
-  const p = total ? Math.min(100, done / total * 100) : 0;
+  const p = total ? Math.min(100, done / total * 100) : 100;
   const dt = (performance.now() - t0) / 1000;
   const sp = dt > 0.6 ? done / dt : 0;
   $('pct').textContent = Math.floor(p);
@@ -381,63 +381,151 @@ $('htabs').onclick = e => {
 $('hclear').onclick = () => { if (confirm('Effacer tout l\'historique ?')) { saveH([]); renderH(); } };
 renderH();
 
-/* ============ RÉCEPTEUR ============ */
+/* WebRTC : ICE sur le réseau local d'abord, STUN en complément. */
+const PEER_CFG = { config: {
+  iceServers: [
+    { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
+    { urls: ['stun:stun2.l.google.com:19302', 'stun:stun.cloudflare.com:3478'] }
+  ],
+  iceTransportPolicy: 'all',
+  iceCandidatePoolSize: 4
+} };
+const NET_TIP = ' Si vos PC sont sur le même routeur, vérifiez l’isolation Wi-Fi / réseau invité, le VPN ou le pare-feu.';
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+/* ============ RÉCEPTEUR : protocole vérifié, reprise automatique ============ */
 const HOME_T = 'Envoyez ou recevez', HOME_S = 'D\'un téléphone à l\'autre, sans câble ni compte.';
 
-/* Réseau : plusieurs serveurs STUN pour mieux se trouver à distance (Rennes ↔ Saint-Malo) */
-const PEER_CFG = { config: { iceServers: [
-  { urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' },
-  { urls: 'stun:stun2.l.google.com:19302' }, { urls: 'stun:stun.cloudflare.com:3478' }
-] } };
-const NET_TIP = ' Astuce : si l\'un des deux est en 4G/5G, essayez en Wi-Fi des deux côtés.';
-const sleep = ms => new Promise(r => setTimeout(r, ms));
-const clean = x => x.replace(/[\\:*?"<>|\u0000-\u001f]/g, '_').trim().replace(/^\.+$/, '_');
 function receive(id) {
   $('title').textContent = 'Réception'; $('sub').textContent = 'Connexion à l\'autre appareil…';
   setChip('En attente…', 0); document.querySelectorAll('.fs').forEach(e => e.textContent = '');
   show('prog'); keepAwake(); t0 = 0;
   const peer = new Peer(undefined, PEER_CFG);
-  const timeout = setTimeout(() => fail('Impossible de joindre l\'émetteur. Vérifiez qu\'il garde sa page ouverte, puis réessayez.' + NET_TIP), 45000);
-  peer.on('error', e => fail('Connexion impossible (' + e.type + '). Réessayez.'));
-  peer.on('open', () => {
-    const conn = peer.connect(id, { reliable: true, serialization: 'raw' });
-    let man = null, cur = null, chunks = [], got = 0, all = 0, finished = false, q = Promise.resolve();
-    const saved = [];
-    const ready = () => { $('title').textContent = 'Réception en cours'; t0 = 0; conn.send(JSON.stringify({ type: 'ready' })); };
-    conn.on('open', () => { clearTimeout(timeout); $('sub').textContent = 'Connecté.'; });
-    const onData = async d => {
-      if (typeof d !== 'string') { got += d.byteLength; chunks.push(d); progress(got, all); return; }
-      const m = JSON.parse(d);
-      if (m.type === 'link') {
-        finished = true; addH('recv', m.text, 0, true, 'link');
-        const u = safeUrl(m.text); if (u) { $('openLnk').href = u; $('openLnk').hidden = false; }
-        $('copyRecv').hidden = false; $('copyRecv').onclick = e => copyTxt(e.currentTarget, m.text);
-        $('dlist').hidden = true; $('title').textContent = 'Lien reçu'; $('sub').textContent = ''; $('dmsg').textContent = m.text;
-        $('again').textContent = 'Recevoir un autre lien'; $('again').onclick = () => location.href = location.pathname; show('done');
-      } else if (m.type === 'manifest') {
-        man = m.files; all = man.reduce((a, x) => a + x.size, 0);
-        setChip(man.length > 1 ? man.length + ' fichiers' : man[0].name, all); $('sub').textContent = '';
-        ready();
-      } else if (m.type === 'file') {
-        cur = man[m.i]; chunks = [];
-        if (man.length > 1) setChip(cur.name, cur.size, 'fichier ' + (m.i + 1) + '/' + man.length);
-      } else if (m.type === 'fend') {
-        const url = URL.createObjectURL(new Blob(chunks, { type: cur.mime || 'application/octet-stream' })); chunks = []; saved.push({ name: cur.name, url });
-        const a = document.createElement('a'); a.href = url; a.download = cur.name; document.body.appendChild(a); a.click(); a.remove(); await sleep(300);
-      } else if (m.type === 'end') {
-        finished = true; const n = man.length, lab = n > 1 ? n + ' fichiers' : man[0].name;
-        addH('recv', lab, all, true);
-        $('title').textContent = n > 1 ? 'Fichiers reçus' : 'Fichier reçu'; $('sub').textContent = '';
-        $('dmsg').textContent = lab + ' (' + fmt(all) + ')';
-        const dl = $('dlist'); dl.textContent = '';
-        saved.forEach(x => { if (!x.url) return; const a = document.createElement('a'); a.href = x.url; a.download = x.name; a.textContent = '⬇ ' + x.name; dl.appendChild(a); });
-        dl.hidden = !dl.children.length;
-        $('again').textContent = 'Recevoir d\'autres fichiers'; $('again').onclick = () => location.href = location.pathname; show('done');
+  let conn = null, attempts = 0, generation = 0, retryTimer = null, connectTimer = null;
+  let finished = false, manifest = null, completedBytes = 0;
+  const saved = [];
+  const transfer = new ReliableTransfer({
+    preferDisk: true,
+    onProgress: p => {
+      if (p.direction === 'receive' && manifest) progress(completedBytes + p.transferred, manifest.total);
+    },
+    onFileReceived: async (file, info) => {
+      if (finished || !manifest) throw new Error('Réception non initialisée.');
+      const expected = manifest.files[saved.length];
+      if (!expected || expected.name !== info.name || expected.size !== file.size) {
+        throw new Error('Fichier inattendu ou incomplet.');
       }
-    };
-    conn.on('data', d => { q = q.then(() => onData(d)).catch(e => { finished = true; fail('Erreur à l\'enregistrement : ' + (e.message || e)); }); });
-    conn.on('close', () => { if (!finished) { finished = true; if (man) addH('recv', man.length > 1 ? man.length + ' fichiers' : man[0].name, all, false); fail('La connexion a été interrompue avant la fin du transfert.' + NET_TIP); } });
+      const url = URL.createObjectURL(file);
+      saved.push({ name: file.name, url });
+      completedBytes += file.size;
+      progress(completedBytes, manifest.total);
+      const a = document.createElement('a'); a.href = url; a.download = file.name;
+      document.body.appendChild(a); a.click(); a.remove();
+    },
+    onError: error => { $('pstat').textContent = 'Contrôle de réception : ' + error.message; }
   });
+  const clearConnectTimer = () => { if (connectTimer) { clearTimeout(connectTimer); connectTimer = null; } };
+  const done = () => { finished = true; clearConnectTimer(); if (retryTimer) clearTimeout(retryTimer); };
+  const stopWithError = message => {
+    if (finished) return;
+    done();
+    if (manifest) addH('recv', manifest.files.length > 1 ? manifest.files.length + ' fichiers' : manifest.files[0].name, manifest.total, false);
+    fail(message + NET_TIP);
+  };
+  const retry = () => {
+    if (finished || retryTimer) return;
+    clearConnectTimer();
+    if (attempts >= 8) {
+      stopWithError('Impossible de rétablir la connexion après plusieurs tentatives. Gardez la page d\'envoi ouverte et recommencez.');
+      return;
+    }
+    const waitMs = Math.min(9000, 900 * Math.pow(1.6, Math.max(0, attempts - 1)));
+    $('title').textContent = 'Reconnexion…';
+    $('pstat').textContent = 'Connexion interrompue : tentative automatique ' + (attempts + 1) + '/8. Ne fermez pas cette page.';
+    retryTimer = setTimeout(() => { retryTimer = null; connect(); }, waitMs);
+  };
+  const handleControl = (d, c, gen) => {
+    if (gen !== generation || typeof d !== 'string') return;
+    let m;
+    try { m = JSON.parse(d); } catch (e) { return; }
+    if (finished) {
+      if (m.type === 'link') { try { c.send(JSON.stringify({ type: 'link-ack' })); } catch (_) {} }
+      return;
+    }
+    if (m.type === 'manifest') {
+      const files = m.files;
+      if (!Array.isArray(files) || !files.length || files.length > 5000 ||
+          files.some(f => typeof f.name !== 'string' || !f.name || !Number.isSafeInteger(f.size) || f.size < 0)) {
+        stopWithError('Liste de fichiers reçue invalide.'); return;
+      }
+      const total = files.reduce((sum, f) => sum + f.size, 0);
+      if (!Number.isSafeInteger(total) || typeof m.share !== 'string' || m.share.length > 120) {
+        stopWithError('Données du transfert invalides.'); return;
+      }
+      if (manifest && (manifest.share !== m.share || manifest.total !== total || manifest.files.length !== files.length)) {
+        stopWithError('Une autre session a tenté d’utiliser la connexion.'); return;
+      }
+      manifest = { files, total, share: m.share };
+      setChip(files.length > 1 ? files.length + ' fichiers' : files[0].name, total);
+      $('title').textContent = 'Réception en cours'; $('sub').textContent = '';
+      $('pstat').textContent = 'Transfert sécurisé. Gardez cette page ouverte.';
+      c.send(JSON.stringify({ type: 'ready', share: m.share }));
+    } else if (m.type === 'end') {
+      if (!manifest || m.share !== manifest.share || saved.length !== manifest.files.length) {
+        $('pstat').textContent = 'Vérification des derniers fichiers…'; return;
+      }
+      c.send(JSON.stringify({ type: 'end-ack', share: manifest.share }));
+      done(); progress(manifest.total, manifest.total);
+      const n = saved.length, lab = n > 1 ? n + ' fichiers' : saved[0].name;
+      addH('recv', lab, manifest.total, true);
+      $('title').textContent = n > 1 ? 'Fichiers reçus' : 'Fichier reçu'; $('sub').textContent = '';
+      $('dmsg').textContent = lab + ' (' + fmt(manifest.total) + ')';
+      const dl = $('dlist'); dl.textContent = '';
+      saved.forEach(x => { const a = document.createElement('a'); a.href = x.url; a.download = x.name; a.textContent = '⬇ ' + x.name; dl.appendChild(a); });
+      dl.hidden = !dl.children.length;
+      $('again').textContent = 'Recevoir d\'autres fichiers'; $('again').onclick = () => location.href = location.pathname;
+      show('done');
+    } else if (m.type === 'link') {
+      if (typeof m.text !== 'string' || m.text.length > 10000) { stopWithError('Lien reçu invalide.'); return; }
+      c.send(JSON.stringify({ type: 'link-ack' }));
+      done(); addH('recv', m.text, 0, true);
+      const u = safeUrl(m.text);
+      $('openLnk').hidden = !u; if (u) $('openLnk').href = u;
+      $('copyRecv').hidden = false; $('copyRecv').onclick = e => copyTxt(e.currentTarget, m.text);
+      $('dlist').hidden = true; $('title').textContent = 'Lien reçu'; $('sub').textContent = ''; $('dmsg').textContent = m.text;
+      $('again').textContent = 'Recevoir un autre lien'; $('again').onclick = () => location.href = location.pathname;
+      show('done');
+    }
+  };
+  const connect = () => {
+    if (finished || !peer.open) return;
+    if (conn) { try { conn.close(); } catch (e) {} }
+    attempts++;
+    const gen = ++generation;
+    $('sub').textContent = 'Tentative de connexion ' + attempts + '/8…';
+    const c = conn = peer.connect(id, { reliable: true, serialization: 'raw' });
+    connectTimer = setTimeout(() => { if (gen === generation && !finished) { c.close(); retry(); } }, 23000);
+    c.on('open', () => {
+      if (gen !== generation || finished) return;
+      clearConnectTimer();
+      try { transfer.attachChannel(c.dataChannel, c.peerConnection); }
+      catch (e) { $('pstat').textContent = e.message; c.close(); retry(); return; }
+      $('sub').textContent = 'Connecté.';
+    });
+    c.on('data', d => handleControl(d, c, gen));
+    c.on('close', () => { if (gen === generation && !finished) retry(); });
+    c.on('error', () => { if (gen === generation && !finished) retry(); });
+  };
+  peer.on('open', () => connect());
+  peer.on('error', e => {
+    if (finished) return;
+    if (e.type === 'peer-unavailable') retry();
+    else if (e.type === 'network' || e.type === 'server-error' || e.type === 'socket-error') {
+      $('pstat').textContent = 'Le service de connexion est temporairement indisponible.';
+      if (peer.disconnected && !peer.destroyed) { try { peer.reconnect(); } catch (_) {} }
+      retry();
+    } else stopWithError('Connexion impossible (' + e.type + ').');
+  });
+  peer.on('disconnected', () => { if (!finished && !peer.destroyed) { try { peer.reconnect(); } catch (e) {} } });
 }
 
 /* ============ MODES : téléphone / PC à PC ============ */
@@ -596,25 +684,51 @@ function wireDrop(el, cb) {
 const targetId = location.hash.slice(1);
 if (targetId) receive(targetId);
 
-/* ============ ÉMETTEUR ============ */
+/* ============ ÉMETTEUR : accusés de réception et reprise ============ */
 else {
-  let items = null, peerId = null, linkText = null;
+  let items = null, peerId = null, linkText = null, session = null;
   const peer = new Peer(undefined, PEER_CFG);
   peer.on('open', id => { peerId = id; if (items) showQR(); });
-  peer.on('error', e => fail('Service de connexion indisponible (' + e.type + '). Rechargez la page.'));
+  peer.on('error', e => {
+    if (e.type === 'network' && peer.disconnected && !peer.destroyed) {
+      try { peer.reconnect(); } catch (_) {}
+    } else if (!session?.activeConn || !session.activeConn.open) {
+      $('sub').textContent = 'Service de connexion : ' + e.type + '. Rechargez si nécessaire.';
+    }
+  });
+  peer.on('disconnected', () => { if (!peer.destroyed) { try { peer.reconnect(); } catch (e) {} } });
 
   const label = it => it.length > 1 ? it.length + ' fichiers' : it[0].file.name;
   const total = it => it.reduce((a, x) => a + x.file.size, 0);
+  const uniqueShare = () => crypto.randomUUID ? crypto.randomUUID() : [...crypto.getRandomValues(new Uint8Array(16))].map(x => x.toString(16).padStart(2, '0')).join('');
+  const makeSession = () => {
+    if (!items && linkText === null) return null;
+    const s = {
+      id: uniqueShare(), items, link: linkText, nextIndex: 0, completedBytes: 0,
+      total: items ? total(items) : 0, activeConn: null, activeGen: 0,
+      finished: false, endTimer: null, idleTimer: null, lastError: null
+    };
+    s.transfer = new ReliableTransfer({
+      onProgress: p => {
+        if (p.direction === 'send' && s.items) progress(s.completedBytes + p.transferred, s.total);
+      },
+      onError: e => { s.lastError = e.message; }
+    });
+    session = s;
+    return s;
+  };
   const setItems = async (entries, root) => {
     const it = await prepare(entries, root); if (!it) return false;
-    items = it; linkText = null; setChip(label(it), total(it), it[0].file._n > 1 ? it[0].file._n + ' fichiers' : ''); return true;
+    items = it; linkText = null; makeSession();
+    setChip(label(it), total(it), it[0].file._n > 1 ? it[0].file._n + ' fichiers' : '');
+    return true;
   };
   const pick = async (en, root) => { if (!(await setItems(en, root))) return; if (peerId) showQR(); else $('sub').textContent = 'Connexion au service…'; };
   $('file').onchange = e => { pick(...fromInput(e.target.files)); e.target.value = ''; };
   $('dirBtn').onclick = () => $('dir').click();
   $('dir').onchange = e => { pick(...fromInput(e.target.files)); e.target.value = ''; };
   wireDrop($('drop'), pick);
-  $('change').onclick = () => { items = null; goHome(); };
+  $('change').onclick = () => { items = null; session = null; goHome(); };
   $('again').onclick = () => location.href = location.pathname;
 
   function showQR() {
@@ -623,45 +737,99 @@ else {
     $('sub').textContent = 'Ouvrez l\'appareil photo de l\'autre téléphone.';
     show('qr'); keepAwake();
   }
-
-  const serve = pr => pr.on('connection', conn => {
-    let ready; const wait = new Promise(r => ready = r);
-    conn.on('data', d => { if (typeof d === 'string') { try { if (JSON.parse(d).type === 'ready') ready(); } catch (e) {} } });
-    conn.on('open', async () => {
-      if (linkText !== null) {
-        conn.send(JSON.stringify({ type: 'link', text: linkText })); addH('sent', linkText, 0, true, 'link');
-        $('title').textContent = 'Lien envoyé'; $('sub').textContent = ''; $('dmsg').textContent = linkText; $('dlist').hidden = true; show('done'); return;
-      }
-      if (!items) return;
-      const list = items, all = total(list), dc = conn.dataChannel; let ended = false, sent = 0;
-      conn.on('close', () => { if (!ended) { ended = true; addH('sent', label(list), all, false); fail('Le destinataire s\'est déconnecté avant la fin du transfert.' + NET_TIP); } });
-      $('title').textContent = 'En attente du destinataire'; $('sub').textContent = ''; setChip(label(list), all); show('prog');
-      conn.send(JSON.stringify({ type: 'manifest', files: list.map(x => ({ name: x.file.name, path: x.path, size: x.file.size, mime: x.file.type })) }));
+  const endSession = (s, success) => {
+    if (s.finished) return;
+    s.finished = true;
+    if (s.idleTimer) clearTimeout(s.idleTimer);
+    if (s.endTimer) clearTimeout(s.endTimer);
+    if (s.items) addH('sent', label(s.items), s.total, success);
+    else if (s.link !== null && success) addH('sent', s.link, 0, true);
+    if (!success) { fail('Transfert interrompu : le destinataire ne répond plus.' + NET_TIP); return; }
+    if (s.items) {
+      progress(s.total, s.total);
+      $('title').textContent = s.items.length > 1 ? 'Fichiers envoyés' : 'Fichier envoyé';
+      $('dmsg').textContent = label(s.items) + ' (' + fmt(s.total) + ')';
+    } else {
+      $('title').textContent = 'Lien envoyé'; $('dmsg').textContent = s.link;
+    }
+    $('sub').textContent = ''; $('dlist').hidden = true; show('done');
+  };
+  const armWaiting = s => {
+    if (s.finished || s.idleTimer) return;
+    $('title').textContent = 'En attente de reconnexion';
+    $('pstat').textContent = 'Connexion interrompue. L\'autre appareil essaie automatiquement de se reconnecter.';
+    s.idleTimer = setTimeout(() => { s.idleTimer = null; if (!s.finished && (!s.activeConn || !s.activeConn.open)) endSession(s, false); }, 95000);
+  };
+  const serve = pr => pr.on('connection', c => {
+    const s = session;
+    if (!s || s.finished) { c.close(); return; }
+    if (s.activeConn && s.activeConn.open) { c.close(); return; }
+    const gen = ++s.activeGen;
+    s.activeConn = c;
+    if (s.idleTimer) { clearTimeout(s.idleTimer); s.idleTimer = null; }
+    let readyResolve, doneResolve;
+    const ready = new Promise(resolve => readyResolve = resolve);
+    const receivedEnd = new Promise(resolve => doneResolve = resolve);
+    c.on('data', d => {
+      if (typeof d !== 'string') return;
+      let m; try { m = JSON.parse(d); } catch (_) { return; }
+      if (m.type === 'ready' && m.share === s.id) readyResolve();
+      if (m.type === 'end-ack' && m.share === s.id) doneResolve();
+      if (m.type === 'link-ack') doneResolve();
+    });
+    c.on('close', () => { if (gen === s.activeGen && !s.finished) armWaiting(s); });
+    c.on('error', () => { if (gen === s.activeGen && !s.finished) armWaiting(s); });
+    c.on('open', async () => {
+      if (s.finished || gen !== s.activeGen) return;
       try {
-        await wait; if (ended) return;
-        $('title').textContent = 'Envoi en cours'; t0 = 0;
-        for (let i = 0; i < list.length; i++) {
-          const f = list[i].file; if (list.length > 1) setChip(f.name, f.size, 'fichier ' + (i + 1) + '/' + list.length);
-          conn.send(JSON.stringify({ type: 'file', i }));
-          for (let off = 0; off < f.size; off += CHUNK) {
-            const buf = await f.slice(off, off + CHUNK).arrayBuffer();
-            while (dc.bufferedAmount > 4 * 1024 * 1024) await sleep(20);
-            if (ended) return; conn.send(buf); sent += buf.byteLength;
-            if ((off / CHUNK) % 16 === 0) progress(sent, all);
-          }
-          conn.send(JSON.stringify({ type: 'fend', i }));
+        if (s.link !== null) {
+          const linkPayload = JSON.stringify({ type: 'link', text: s.link });
+          c.send(linkPayload);
+          const linkRetry = setInterval(() => { if (c.open && !s.finished) { try { c.send(linkPayload); } catch (_) {} } }, 1300);
+          try { await Promise.race([receivedEnd, sleep(20000).then(() => { throw Error('Aucune confirmation du lien.'); })]); }
+          finally { clearInterval(linkRetry); }
+          if (gen === s.activeGen) endSession(s, true);
+          return;
         }
-        while (dc.bufferedAmount > 0) await sleep(50);
-        progress(all, all); conn.send(JSON.stringify({ type: 'end' }));
-        ended = true; addH('sent', label(list), all, true);
-        $('title').textContent = list.length > 1 ? 'Fichiers envoyés' : 'Fichier envoyé'; $('sub').textContent = '';
-        $('dmsg').textContent = label(list) + ' (' + fmt(all) + ')'; $('dlist').hidden = true; show('done');
-      } catch (e) { if (!ended) { ended = true; addH('sent', label(list), all, false); fail('L\'envoi a été interrompu. Réessayez.'); } }
+        s.transfer.attachChannel(c.dataChannel, c.peerConnection);
+        $('title').textContent = 'En attente du destinataire'; $('sub').textContent = '';
+        setChip(label(s.items), s.total); show('prog');
+        const hello = JSON.stringify({ type: 'manifest', share: s.id,
+          files: s.items.map(x => ({ name: x.file.name, size: x.file.size, mime: x.file.type, path: x.path })) });
+        c.send(hello);
+        // The far end may not have installed its receive handler yet on opening.
+        const helloRetry = setInterval(() => { if (c.open && !s.finished) { try { c.send(hello); } catch (_) {} } }, 1400);
+        try { await Promise.race([ready, sleep(30000).then(() => { throw Error('Aucune réponse du destinataire.'); })]); }
+        finally { clearInterval(helloRetry); }
+        if (s.finished || gen !== s.activeGen) return;
+        $('title').textContent = 'Envoi en cours'; t0 = 0;
+        $('pstat').textContent = 'Envoi fiable : contrôle des blocs et confirmation à la réception.';
+        for (let i = s.nextIndex; i < s.items.length; i++) {
+          if (s.finished || gen !== s.activeGen) return;
+          const file = s.items[i].file;
+          if (s.items.length > 1) setChip(file.name, file.size, 'fichier ' + (i + 1) + '/' + s.items.length);
+          await s.transfer.sendFile(file, { id: s.id + '-' + i });
+          s.completedBytes += file.size;
+          s.nextIndex = i + 1;
+          progress(s.completedBytes, s.total);
+        }
+        if (s.finished || gen !== s.activeGen) return;
+        c.send(JSON.stringify({ type: 'end', share: s.id }));
+        await Promise.race([receivedEnd, sleep(25000).then(() => { throw Error('Confirmation finale non reçue.'); })]);
+        if (gen === s.activeGen) endSession(s, true);
+      } catch (e) {
+        if (gen === s.activeGen && !s.finished) {
+          s.lastError = e.message;
+          $('pstat').textContent = 'Connexion interrompue, reprise en attente : ' + e.message;
+          try { c.close(); } catch (_) {}
+          armWaiting(s);
+        }
+      }
     });
   });
   serve(peer);
 
-  /* --- code à 6 caractères (PC à PC et liens) --- */
+  /* --- Code à 6 caractères (PC à PC et liens) : interface inchangée --- */
   let pcPeer = null, pcTok = 0, pcCode = '';
   const pcLink = () => location.origin + location.pathname + '#tqrx-' + pcCode;
   const spaced = c => c.slice(0, 3) + ' ' + c.slice(3);
@@ -671,7 +839,10 @@ else {
     const open = () => {
       const code = genCode(), p = new Peer('tqrx-' + code, PEER_CFG);
       p.on('open', () => { if (tok !== pcTok) { p.destroy(); return; } pcPeer = p; pcCode = code; onReady(code); });
-      p.on('error', e => { if (e.type === 'unavailable-id' && tries++ < 5) { p.destroy(); open(); } else fail('Service de connexion indisponible (' + e.type + '). Rechargez la page.'); });
+      p.on('error', e => {
+        if (e.type === 'unavailable-id' && tries++ < 5) { p.destroy(); open(); }
+        else fail('Service de connexion indisponible (' + e.type + '). Rechargez la page.');
+      });
       serve(p);
     };
     open();
@@ -681,12 +852,16 @@ else {
     openCode(code => { $('codeBig').textContent = spaced(code); $('title').textContent = 'Code de transfert'; $('sub').textContent = 'Saisissez-le sur l\'autre appareil.'; show('code'); keepAwake(); });
   }
   function startLinkShare(text) {
+    linkText = text; items = null; makeSession();
     openCode(code => {
-      linkText = text; items = null; $('lnk').textContent = text; $('lqr').innerHTML = qrSvg(pcLink()); $('lcodeBig').textContent = spaced(code);
+      $('lnk').textContent = text; $('lqr').innerHTML = qrSvg(pcLink()); $('lcodeBig').textContent = spaced(code);
       $('title').textContent = 'Lien prêt'; $('sub').textContent = 'Scannez le QR code ou saisissez le code.'; show('lcode'); keepAwake();
     });
   }
-  const cancelCode = () => { pcTok++; if (pcPeer) { pcPeer.destroy(); pcPeer = null; } linkText = null; goHome(); };
+  const cancelCode = () => {
+    pcTok++; if (pcPeer) { pcPeer.destroy(); pcPeer = null; }
+    linkText = null; session = null; goHome();
+  };
   $('pcfile').onchange = e => { startPcShare(...fromInput(e.target.files)); e.target.value = ''; };
   $('pcdirBtn').onclick = () => $('pcdir').click();
   $('pcdir').onchange = e => { startPcShare(...fromInput(e.target.files)); e.target.value = ''; };
@@ -701,7 +876,10 @@ else {
   };
   $('codeGo').onclick = go('codeIn', 'codeErr'); $('codeIn').onkeydown = e => { if (e.key === 'Enter') $('codeGo').click(); };
   $('lcodeGo').onclick = go('lcodeIn', 'lcodeErr'); $('lcodeIn').onkeydown = e => { if (e.key === 'Enter') $('lcodeGo').click(); };
-  $('linkGo').onclick = () => { const t = $('linkIn').value.trim(); if (!t) { $('linkErr').textContent = 'Collez d\'abord un lien.'; return; } $('linkErr').textContent = ''; startLinkShare(t); };
+  $('linkGo').onclick = () => {
+    const t = $('linkIn').value.trim(); if (!t) { $('linkErr').textContent = 'Collez d\'abord un lien.'; return; }
+    $('linkErr').textContent = ''; startLinkShare(t);
+  };
   $('lcopyCode').onclick = e => copyTxt(e.currentTarget, pcCode);
   $('lcopyLink').onclick = e => copyTxt(e.currentTarget, pcLink());
   $('lcancel').onclick = cancelCode; $('lscan').onclick = startScan;
