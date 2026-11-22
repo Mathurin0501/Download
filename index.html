@@ -288,7 +288,23 @@ document.querySelectorAll('.ic').forEach(e => e.innerHTML = ICON);
 
 const fmt = n => n === 0 ? '0 o' : n >= 1e9 ? (n/1e9).toFixed(2)+' Go' : n >= 1e6 ? (n/1e6).toFixed(1)+' Mo' : Math.max(1,Math.round(n/1e3))+' Ko';
 const fmtT = s => !isFinite(s) ? '–' : s < 60 ? Math.ceil(s)+' s' : Math.floor(s/60)+' min '+String(Math.ceil(s%60)).padStart(2,'0');
-const show = v => { document.querySelectorAll('.view').forEach(e => e.hidden = e.id !== 'v-' + v); const home = v === 'pick' || v === 'pc' || v === 'link'; $('histcard').hidden = !home; $('modes').hidden = !home; };
+/* ============ MISE A JOUR AUTOMATIQUE (site et PWA) ============ */
+// Ne jamais recharger lorsqu'un transfert, une reception ou un telechargement est affiche.
+// La mise a jour en attente sera appliquee au prochain retour a l'accueil.
+let pendingAppUpdate = false;
+let appUpdateReloading = false;
+const appCanUpdate = () => {
+  const active = document.querySelector('.view:not([hidden])');
+  return !!active && ['v-pick', 'v-pc', 'v-link'].includes(active.id);
+};
+function applyAppUpdateIfSafe() {
+  if (pendingAppUpdate && !appUpdateReloading && appCanUpdate() && navigator.onLine !== false) {
+    appUpdateReloading = true;
+    // Redemande l'HTML et le module JavaScript apres activation du nouveau service worker.
+    location.reload();
+  }
+}
+const show = v => { document.querySelectorAll('.view').forEach(e => e.hidden = e.id !== 'v-' + v); const home = v === 'pick' || v === 'pc' || v === 'link'; $('histcard').hidden = !home; $('modes').hidden = !home; if (home) applyAppUpdateIfSafe(); };
 const setChip = (name, size, extra) => { document.querySelectorAll('.fn').forEach(e => e.textContent = name); document.querySelectorAll('.fs').forEach(e => e.textContent = (extra ? extra + ' · ' : '') + fmt(size)); };
 const fail = m => { $('emsg').textContent = m; show('err'); };
 const keepAwake = async () => { try { await navigator.wakeLock.request('screen'); } catch(e){} };
@@ -334,7 +350,68 @@ function qrSvg(text) {
 
 /* ============ HISTORIQUE (stocké uniquement sur ce téléphone) ============ */
 /* ============ INSTALLATION (PWA) ============ */
-if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+if ('serviceWorker' in navigator) {
+  const sw = navigator.serviceWorker;
+  // La premiere installation ne necessite pas de rechargement. Les mises a jour oui.
+  let controlledAtStart = !!sw.controller;
+  let lastAppUpdateCheck = 0;
+  let appUpdateRegistration = null;
+  let checkingAppUpdate = false;
+  const requestAppAssetCheck = () => {
+    try { sw.controller?.postMessage({ type: 'CHECK_APP_ASSETS' }); } catch (_) {}
+  };
+  const checkAppUpdates = async (force = false) => {
+    if (navigator.onLine === false || checkingAppUpdate) return;
+    const now = Date.now();
+    if (!force && now - lastAppUpdateCheck < 60000) return;
+    lastAppUpdateCheck = now;
+    checkingAppUpdate = true;
+    try {
+      const reg = appUpdateRegistration || await sw.getRegistration();
+      if (!reg) return;
+      await reg.update();  // Evite d'attendre le cycle automatique du navigateur.
+      if (reg.waiting) reg.waiting.postMessage({ type: 'SKIP_WAITING' });
+      requestAppAssetCheck(); // Detecte aussi les changements de HTML/JS sans nouveau sw.js.
+    } catch (_) {
+      // Hors ligne ou serveur momentanement inaccessible : l'application continue de fonctionner.
+    } finally { checkingAppUpdate = false; }
+  };
+  sw.addEventListener('message', e => {
+    if (e.data?.type === 'APP_UPDATE_AVAILABLE') {
+      pendingAppUpdate = true;
+      applyAppUpdateIfSafe();
+    }
+  });
+  sw.addEventListener('controllerchange', () => {
+    if (controlledAtStart) {
+      pendingAppUpdate = true;
+      applyAppUpdateIfSafe();
+    } else {
+      controlledAtStart = true;
+      requestAppAssetCheck();
+    }
+  });
+  sw.register('./sw.js', { updateViaCache: 'none' }).then(reg => {
+    appUpdateRegistration = reg;
+    reg.addEventListener('updatefound', () => {
+      const installing = reg.installing;
+      if (!installing) return;
+      installing.addEventListener('statechange', () => {
+        if (installing.state === 'installed' && reg.waiting) {
+          reg.waiting.postMessage({ type: 'SKIP_WAITING' });
+        }
+      });
+    });
+    checkAppUpdates(true);
+  }).catch(() => {});
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) { applyAppUpdateIfSafe(); checkAppUpdates(); }
+  });
+  addEventListener('focus', () => { applyAppUpdateIfSafe(); checkAppUpdates(); });
+  addEventListener('online', () => checkAppUpdates(true));
+  // Ouverte plusieurs heures : recherche des versions recentes toutes les 10 minutes.
+  setInterval(() => { if (!document.hidden) checkAppUpdates(true); }, 10 * 60 * 1000);
+}
 let dip = null;
 addEventListener('beforeinstallprompt', e => { e.preventDefault(); dip = e; $('install').hidden = false; });
 addEventListener('appinstalled', () => { $('install').hidden = true; });
