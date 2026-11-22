@@ -264,7 +264,7 @@ footer{text-align:center;color:var(--mute);font-size:12px;margin-top:18px;opacit
   <div class="view" id="v-err" hidden>
     <h2>Oups</h2>
     <p class="msg" id="emsg"></p>
-    <button class="btn" onclick="location.href=location.pathname">Réessayer</button>
+    <div class="row"><button class="btn" onclick="location.href=location.pathname">Réessayer</button><button class="btn ghost" id="copyDiag" hidden>Copier le diagnostic</button></div>
   </div>
 </section>
 
@@ -466,6 +466,10 @@ renderH();
  */
 const PEER_CFG = { debug: 1 };
 const NET_TIP = ' Sur Opera, vérifiez que le VPN est désactivé. Essayez Edge/Chrome sur les deux PC. Un réseau invité ou un pare-feu peuvent également bloquer WebRTC.';
+const APP_BUILD = 'V7-20261122';
+let lastNetworkDiagnostic = '';
+$('copyDiag').onclick = e => copyTxt(e.currentTarget, lastNetworkDiagnostic);
+
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 // En mode PC, reutiliser le pair PeerJS deja connecte pour ne pas ouvrir
 // une seconde connexion de signalisation dans le meme onglet.
@@ -477,7 +481,45 @@ function receive(id) {
   $('title').textContent = 'Réception'; $('sub').textContent = 'Connexion à l\'autre appareil…';
   setChip('En attente…', 0); document.querySelectorAll('.fs').forEach(e => e.textContent = '');
   show('prog'); keepAwake(); t0 = 0;
+  $('copyDiag').hidden = true; lastNetworkDiagnostic = '';
   const peer = idlePeer && !idlePeer.destroyed ? idlePeer : new Peer(undefined, PEER_CFG);
+  const attemptsDiagnostic = [];
+  const captureDiagnosis = async (reason, c) => {
+    const pc = c?.peerConnection;
+    const entry = { reason, signaling: peer.open ? 'peerjs-ok' : 'peerjs-hors-ligne',
+      connection: pc?.connectionState || '?', ice: pc?.iceConnectionState || '?',
+      gathering: pc?.iceGatheringState || '?', local: {}, remote: {}, testedPairs: 0, successfulPairs: 0 };
+    if (pc?.getStats) {
+      try {
+        const stats = await pc.getStats();
+        stats.forEach(stat => {
+          if (stat.type === 'local-candidate' || stat.type === 'remote-candidate') {
+            const field = stat.type === 'local-candidate' ? 'local' : 'remote';
+            const kind = stat.candidateType || 'inconnu';
+            entry[field][kind] = (entry[field][kind] || 0) + 1;
+          } else if (stat.type === 'candidate-pair') {
+            entry.testedPairs++;
+            if (stat.state === 'succeeded') entry.successfulPairs++;
+          }
+        });
+      } catch (_) { /* Informations non disponibles dans ce navigateur. */ }
+    }
+    attemptsDiagnostic.push(entry);
+    if (attemptsDiagnostic.length > 8) attemptsDiagnostic.shift();
+  };
+  const prepareDiagnosis = message => {
+    lastNetworkDiagnostic = [
+      'Transfert QR ' + APP_BUILD,
+      'Navigateur : ' + navigator.userAgent,
+      'Page sécurisée : ' + isSecureContext,
+      'Connexion au service PeerJS : ' + (peer.open ? 'OK' : 'absente'),
+      'Identifiant émetteur : ' + (/^tqrx-/.test(id) ? 'code PC' : 'lien QR/complet'),
+      'Erreur : ' + message,
+      'Tentatives : ' + attemptsDiagnostic.length,
+      ...attemptsDiagnostic.map((a, i) => 'Tentative ' + (i + 1) + ' : ' + JSON.stringify(a))
+    ].join('\n');
+    $('copyDiag').hidden = false;
+  };
   let conn = null, attempts = 0, generation = 0, retryTimer = null, connectTimer = null;
   let finished = false, manifest = null, completedBytes = 0;
   let everConnected = false, lastIssue = '', missingCodeErrors = 0;
@@ -508,6 +550,7 @@ function receive(id) {
     if (finished) return;
     done();
     if (manifest) addH('recv', manifest.files.length > 1 ? manifest.files.length + ' fichiers' : manifest.files[0].name, manifest.total, false);
+    prepareDiagnosis(message);
     fail(message + NET_TIP);
   };
   const retry = (reason = '') => {
@@ -604,12 +647,16 @@ function receive(id) {
     let c;
     try { c = conn = peer.connect(id, { reliable: true, serialization: 'raw' }); }
     catch (e) { retry('Impossible de lancer WebRTC : ' + e.message); return; }
-    connectTimer = setTimeout(() => {
+    connectTimer = setTimeout(async () => {
       if (gen !== generation || finished) return;
       const reason = diagnose(c);
+      await captureDiagnosis(reason, c);
+      if (gen !== generation || finished) return;
+      generation++; // Invalide les événements tardifs de l'ancien canal.
+      if (conn === c) conn = null;
       try { c.close(); } catch (_) {}
       retry(reason);
-    }, 20000);
+    }, 16000);
     c.on('open', () => {
       if (gen !== generation || finished) return;
       clearConnectTimer();
@@ -622,8 +669,12 @@ function receive(id) {
       $('pstat').textContent = 'Les deux PC communiquent. Démarrage du transfert…';
     });
     c.on('data', d => handleControl(d, c, gen));
-    c.on('close', () => { if (gen === generation && !finished) retry(diagnose(c)); });
-    c.on('error', e => { if (gen === generation && !finished) retry(e?.message || diagnose(c)); });
+    c.on('close', () => { if (gen === generation && !finished) {
+      const reason = diagnose(c); captureDiagnosis(reason, c).finally(() => retry(reason));
+    } });
+    c.on('error', e => { if (gen === generation && !finished) {
+      const reason = e?.message || diagnose(c); captureDiagnosis(reason, c).finally(() => retry(reason));
+    } });
   };
   peer.on('open', () => {
     if (finished || conn?.open) return;
@@ -811,13 +862,24 @@ if (targetId) receive(targetId);
 /* ============ ÉMETTEUR : accusés de réception et reprise ============ */
 else {
   let items = null, peerId = null, linkText = null, session = null;
-  const peer = idlePeer = new Peer(undefined, PEER_CFG);
-  peer.on('open', id => { peerId = id; if (items && !session?.activeConn?.open && mode === 'phone') showQR(); });
+  // Un seul identifiant PeerJS, valable à la fois pour le QR, le lien complet
+  // et le code PC à PC. L'ancienne version ouvrait deux PeerJS émetteurs.
+  // Le code aléatoire est éphémère : une nouvelle page crée un autre code.
+  const oneTimeCode = genCode();
+  const peer = idlePeer = new Peer('tqrx-' + oneTimeCode, PEER_CFG);
+  let pendingPcReady = null;
+  peer.on('open', id => {
+    peerId = id;
+    if (pendingPcReady) { const cb = pendingPcReady; pendingPcReady = null; cb(oneTimeCode); }
+    if (items && !session?.activeConn?.open && mode === 'phone') showQR();
+  });
   peer.on('error', e => {
     if (e.type === 'network' && peer.disconnected && !peer.destroyed) {
       try { peer.reconnect(); } catch (_) {}
     } else if (!session?.activeConn || !session.activeConn.open) {
-      $('sub').textContent = 'Service de connexion : ' + e.type + '. Rechargez si nécessaire.';
+      if (e.type === 'unavailable-id') {
+        fail('Ce code temporaire est déjà utilisé. Rechargez la page pour générer un nouveau code.');
+      } else $('sub').textContent = 'Service de connexion : ' + e.type + '. Rechargez si nécessaire.';
     }
   });
   peer.on('disconnected', () => { if (!peer.destroyed) { try { peer.reconnect(); } catch (e) {} } });
@@ -953,39 +1015,16 @@ else {
   });
   serve(peer);
 
-  /* --- Code à 6 caractères (PC à PC et liens) : interface inchangée --- */
-  let pcPeer = null, pcTok = 0, pcCode = '';
-  // En mode PC, le lien complet utilise l'identifiant aleatoire du pair principal.
-  // Il contourne l'enregistrement d'un second identifiant court sur PeerJS.
-  // Le code a 6 caracteres reste operationnel comme voie simple de partage.
-  const pcLink = () => location.origin + location.pathname + '#' + (peer.open && peerId ? peerId : 'tqrx-' + pcCode);
+  /* --- Un seul pair émetteur et un code à 6 caractères (PC à PC / liens / QR) --- */
+  let pcCode = oneTimeCode;
+  const pcLink = () => location.origin + location.pathname + '#' + peerId;
   const spaced = c => c.slice(0, 3) + ' ' + c.slice(3);
   function openCode(onReady) {
-    const tok = ++pcTok; let tries = 0;
-    if (pcPeer) { pcPeer.destroy(); pcPeer = null; }
-    const open = () => {
-      const code = genCode(), p = new Peer('tqrx-' + code, PEER_CFG);
-      let presented = false;
-      p.on('open', () => {
-        if (tok !== pcTok) { p.destroy(); return; }
-        pcPeer = p; pcCode = code;
-        if (!presented) { presented = true; onReady(code); }
-      });
-      p.on('disconnected', () => {
-        if (tok !== pcTok || p.destroyed) return;
-        try { p.reconnect(); } catch (_) { $('sub').textContent = 'Serveur de connexion indisponible. Conservez cette page ouverte.'; }
-      });
-      p.on('error', e => {
-        if (tok !== pcTok) return;
-        if (e.type === 'unavailable-id' && tries++ < 5 && !presented) { p.destroy(); open(); }
-        else if (['network', 'server-error', 'socket-error', 'socket-closed'].includes(e.type)) {
-          $('sub').textContent = 'Service de connexion momentanément indisponible (' + e.type + ').';
-          if (p.disconnected && !p.destroyed) { try { p.reconnect(); } catch (_) {} }
-        } else fail('Service de connexion indisponible (' + e.type + '). Rechargez la page.');
-      });
-      serve(p);
-    };
-    open();
+    if (peer.open && peerId) onReady(pcCode);
+    else {
+      pendingPcReady = onReady;
+      $('sub').textContent = 'Connexion au service PeerJS…';
+    }
   }
   async function startPcShare(en, root) {
     if (!(await setItems(en, root))) return;
@@ -999,7 +1038,7 @@ else {
     });
   }
   const cancelCode = () => {
-    pcTok++; if (pcPeer) { pcPeer.destroy(); pcPeer = null; }
+    pendingPcReady = null;
     linkText = null; session = null; goHome();
   };
   $('pcfile').onchange = e => { startPcShare(...fromInput(e.target.files)); e.target.value = ''; };
