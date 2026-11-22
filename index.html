@@ -381,12 +381,16 @@ $('htabs').onclick = e => {
 $('hclear').onclick = () => { if (confirm('Effacer tout l\'historique ?')) { saveH([]); renderH(); } };
 renderH();
 
-/* WebRTC : ICE sur le réseau local d'abord, STUN en complément. */
+/* WebRTC : ICE sur le réseau local d'abord, STUN puis relais TURN en dernier recours. */
 const PEER_CFG = { config: {
   iceServers: [
     { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
-    { urls: ['stun:stun2.l.google.com:19302', 'stun:stun.cloudflare.com:3478'] }
+    { urls: ['stun:stun2.l.google.com:19302', 'stun:stun.cloudflare.com:3478'] },
+    // Relais TURN de secours (réseaux d'école/entreprise, NAT stricts, Wi-Fi isolé).
+    // Sans lui, un PC à PC échoue dès que la liaison directe est impossible.
+    { urls: ['turn:eu-0.turn.peerjs.com:3478', 'turn:us-0.turn.peerjs.com:3478'], username: 'peerjs', credential: 'peerjsp' }
   ],
+  sdpSemantics: 'unified-plan',
   iceTransportPolicy: 'all',
   iceCandidatePoolSize: 4
 } };

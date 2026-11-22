@@ -1,4 +1,4 @@
-const CACHE='transfert-qr-v4';
+const CACHE='transfert-qr-v5';
 const FILES=['./','./index.html','./robust-transfer.js','./manifest.webmanifest'];
 self.addEventListener('install',e=>{
   e.waitUntil(caches.open(CACHE).then(c=>c.addAll(FILES)).then(()=>self.skipWaiting()));
