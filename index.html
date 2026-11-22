@@ -381,20 +381,14 @@ $('htabs').onclick = e => {
 $('hclear').onclick = () => { if (confirm('Effacer tout l\'historique ?')) { saveH([]); renderH(); } };
 renderH();
 
-/* WebRTC : ICE sur le réseau local d'abord, STUN puis relais TURN en dernier recours. */
-const PEER_CFG = { config: {
-  iceServers: [
-    { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
-    { urls: ['stun:stun2.l.google.com:19302', 'stun:stun.cloudflare.com:3478'] },
-    // Relais TURN de secours (réseaux d'école/entreprise, NAT stricts, Wi-Fi isolé).
-    // Sans lui, un PC à PC échoue dès que la liaison directe est impossible.
-    { urls: ['turn:eu-0.turn.peerjs.com:3478', 'turn:us-0.turn.peerjs.com:3478'], username: 'peerjs', credential: 'peerjsp' }
-  ],
-  sdpSemantics: 'unified-plan',
-  iceTransportPolicy: 'all',
-  iceCandidatePoolSize: 4
-} };
-const NET_TIP = ' Si vos PC sont sur le même routeur, vérifiez l’isolation Wi-Fi / réseau invité, le VPN ou le pare-feu.';
+/*
+ * PeerJS 1.5.4 possede une configuration ICE native avec STUN ET TURN.
+ * Ne PAS redefinir config.iceServers ici : cela remplacerait les relais TURN
+ * par de simples serveurs STUN et rendrait les reseaux restrictifs injoignables.
+ * debug:1 donne les erreurs utiles dans la console sans toucher a l'interface.
+ */
+const PEER_CFG = { debug: 1 };
+const NET_TIP = ' Sur Opera, vérifiez que le VPN est désactivé. Essayez Edge/Chrome sur les deux PC. Un réseau invité ou un pare-feu peuvent également bloquer WebRTC.';
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 // En mode PC, reutiliser le pair PeerJS deja connecte pour ne pas ouvrir
 // une seconde connexion de signalisation dans le meme onglet.
@@ -510,10 +504,10 @@ function receive(id) {
   const diagnose = c => {
     const ice = c?.peerConnection?.iceConnectionState;
     if (ice === 'failed' || ice === 'disconnected') {
-      return 'La liaison directe WebRTC semble bloquée. Vérifiez le réseau invité, le pare-feu, le VPN et l’isolation Wi-Fi.';
+      return 'La liaison WebRTC a échoué. Si vous utilisez Opera, désactivez son VPN ou essayez Edge/Chrome. Vérifiez aussi le pare-feu et le réseau invité.';
     }
     if (ice === 'checking' || ice === 'new') {
-      return 'Les deux PC ne parviennent pas à négocier leur connexion WebRTC. Vérifiez qu’ils sont sur le même réseau non isolé.';
+      return 'Connexion WebRTC en attente. Essayez Edge ou Chrome sans VPN sur les deux PC, puis vérifiez l’isolation Wi-Fi.';
     }
     return 'Le PC émetteur n’a pas répondu. Vérifiez qu’il affiche encore le même code.';
   };
