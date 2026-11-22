@@ -308,18 +308,37 @@ const show = v => { document.querySelectorAll('.view').forEach(e => e.hidden = e
 const setChip = (name, size, extra) => { document.querySelectorAll('.fn').forEach(e => e.textContent = name); document.querySelectorAll('.fs').forEach(e => e.textContent = (extra ? extra + ' · ' : '') + fmt(size)); };
 const fail = m => { $('emsg').textContent = m; show('err'); };
 const keepAwake = async () => { try { await navigator.wakeLock.request('screen'); } catch(e){} };
+// Only warn before an active transfer; do not interfere with auto-updates at home.
+addEventListener('beforeunload', event => {
+  const active = document.querySelector('.view:not([hidden])');
+  if (active?.id === 'v-prog') {
+    event.preventDefault();
+    event.returnValue = '';
+  }
+});
 
-let t0 = 0;
+let t0 = 0, lastProgressTime = 0, lastProgressBytes = 0, progressStartBytes = 0, smoothSpeed = 0;
 function progress(done, total) {
-  if (!t0) t0 = performance.now();
+  const now = performance.now();
+  if (!t0) { t0 = now; lastProgressTime = now; lastProgressBytes = done; progressStartBytes = done; smoothSpeed = 0; }
+  const elapsed = (now - lastProgressTime) / 1000;
+  if (elapsed >= .15) {
+    const instant = Math.max(0, done - lastProgressBytes) / elapsed;
+    smoothSpeed = smoothSpeed ? smoothSpeed * .7 + instant * .3 : instant;
+    lastProgressBytes = done;
+    lastProgressTime = now;
+  }
   const p = total ? Math.min(100, done / total * 100) : 100;
-  const dt = (performance.now() - t0) / 1000;
-  const sp = dt > 0.6 ? done / dt : 0;
+  const average = (now - t0) > 600 ? Math.max(0, done - progressStartBytes) / ((now - t0) / 1000) : 0;
+  const speed = smoothSpeed || average;
   $('pct').textContent = Math.floor(p);
   $('fill').style.width = p + '%';
-  $('spd').textContent = sp ? fmt(sp) + '/s' : '–';
-  $('eta').textContent = sp ? fmtT((total - done) / sp) : '–';
+  $('spd').textContent = speed ? fmt(speed) + '/s' : '–';
+  $('eta').textContent = speed ? fmtT((total - done) / speed) : '–';
   $('amt').textContent = fmt(done);
+}
+function resetProgress() {
+  t0 = 0; lastProgressTime = 0; lastProgressBytes = 0; progressStartBytes = 0; smoothSpeed = 0;
 }
 
 /* QR code stylé : points ronds, repères arrondis, dégradé et logo central */
@@ -466,7 +485,7 @@ renderH();
  */
 const PEER_CFG = { debug: 1 };
 const NET_TIP = ' Sur Opera, vérifiez que le VPN est désactivé. Essayez Edge/Chrome sur les deux PC. Un réseau invité ou un pare-feu peuvent également bloquer WebRTC.';
-const APP_BUILD = 'V7-20261122';
+const APP_BUILD = 'V8-20261122';
 let lastNetworkDiagnostic = '';
 $('copyDiag').onclick = e => copyTxt(e.currentTarget, lastNetworkDiagnostic);
 
@@ -480,7 +499,7 @@ const HOME_T = 'Envoyez ou recevez', HOME_S = 'D\'un téléphone à l\'autre, sa
 function receive(id) {
   $('title').textContent = 'Réception'; $('sub').textContent = 'Connexion à l\'autre appareil…';
   setChip('En attente…', 0); document.querySelectorAll('.fs').forEach(e => e.textContent = '');
-  show('prog'); keepAwake(); t0 = 0;
+  show('prog'); keepAwake(); resetProgress();
   $('copyDiag').hidden = true; lastNetworkDiagnostic = '';
   const peer = idlePeer && !idlePeer.destroyed ? idlePeer : new Peer(undefined, PEER_CFG);
   const attemptsDiagnostic = [];
@@ -524,6 +543,25 @@ function receive(id) {
   let finished = false, manifest = null, completedBytes = 0;
   let everConnected = false, lastIssue = '', missingCodeErrors = 0;
   const saved = [];
+  addEventListener('pagehide', () => { for (const x of saved) try { URL.revokeObjectURL(x.url); } catch (_) {} }, { once: true });
+  let pendingEndShare = null;
+  const completeIfReady = () => {
+    if (finished || !manifest || pendingEndShare !== manifest.share ||
+        saved.length !== manifest.files.length || !conn?.open) return false;
+    try { conn.send(JSON.stringify({ type: 'end-ack', share: manifest.share })); }
+    catch (_) { return false; }
+    done(); progress(manifest.total, manifest.total);
+    const n = saved.length, lab = n > 1 ? n + ' fichiers' : saved[0].name;
+    addH('recv', lab, manifest.total, true);
+    $('title').textContent = n > 1 ? 'Fichiers reçus' : 'Fichier reçu'; $('sub').textContent = '';
+    $('dmsg').textContent = lab + ' (' + fmt(manifest.total) + ')';
+    const dl = $('dlist'); dl.textContent = '';
+    saved.forEach(x => { const a = document.createElement('a'); a.href = x.url; a.download = x.name; a.textContent = '⬇ ' + x.name; dl.appendChild(a); });
+    dl.hidden = !dl.children.length;
+    $('again').textContent = 'Recevoir d\'autres fichiers'; $('again').onclick = () => location.href = location.pathname;
+    show('done');
+    return true;
+  };
   const transfer = new ReliableTransfer({
     preferDisk: true,
     onProgress: p => {
@@ -541,6 +579,7 @@ function receive(id) {
       progress(completedBytes, manifest.total);
       const a = document.createElement('a'); a.href = url; a.download = file.name;
       document.body.appendChild(a); a.click(); a.remove();
+      completeIfReady();
     },
     onError: error => { $('pstat').textContent = 'Contrôle de réception : ' + error.message; }
   });
@@ -595,20 +634,9 @@ function receive(id) {
       $('pstat').textContent = 'Transfert sécurisé. Gardez cette page ouverte.';
       c.send(JSON.stringify({ type: 'ready', share: m.share }));
     } else if (m.type === 'end') {
-      if (!manifest || m.share !== manifest.share || saved.length !== manifest.files.length) {
-        $('pstat').textContent = 'Vérification des derniers fichiers…'; return;
-      }
-      c.send(JSON.stringify({ type: 'end-ack', share: manifest.share }));
-      done(); progress(manifest.total, manifest.total);
-      const n = saved.length, lab = n > 1 ? n + ' fichiers' : saved[0].name;
-      addH('recv', lab, manifest.total, true);
-      $('title').textContent = n > 1 ? 'Fichiers reçus' : 'Fichier reçu'; $('sub').textContent = '';
-      $('dmsg').textContent = lab + ' (' + fmt(manifest.total) + ')';
-      const dl = $('dlist'); dl.textContent = '';
-      saved.forEach(x => { const a = document.createElement('a'); a.href = x.url; a.download = x.name; a.textContent = '⬇ ' + x.name; dl.appendChild(a); });
-      dl.hidden = !dl.children.length;
-      $('again').textContent = 'Recevoir d\'autres fichiers'; $('again').onclick = () => location.href = location.pathname;
-      show('done');
+      if (!manifest || m.share !== manifest.share) return;
+      pendingEndShare = m.share;
+      if (!completeIfReady()) $('pstat').textContent = 'Vérification des derniers fichiers…';
     } else if (m.type === 'link') {
       if (typeof m.text !== 'string' || m.text.length > 10000) { stopWithError('Lien reçu invalide.'); return; }
       c.send(JSON.stringify({ type: 'link-ack' }));
@@ -780,6 +808,7 @@ async function crc32(f, adv) {
   return (c ^ 0xFFFFFFFF) >>> 0;
 }
 async function makeZip(entries, onp) {
+  if (entries.length > 65535) throw new Error('Trop de fichiers pour une archive ZIP classique.');
   const enc = new TextEncoder(), parts = [], cen = [], seen = new Set();
   const total = entries.reduce((a, x) => a + x.file.size, 0) || 1; let done = 0, off = 0;
   const d = new Date(), dd = ((d.getFullYear() - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate(), tt = (d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1);
@@ -787,7 +816,9 @@ async function makeZip(entries, onp) {
     let pth = path.replace(/^\/+/, ''), k = 1;
     while (seen.has(pth)) pth = path.replace(/(\.[^./]*)?$/, ' (' + (k++) + ')$1');
     seen.add(pth);
-    const nm = enc.encode(pth), crc = await crc32(f, n => { done += n; onp(Math.round(done / total * 100)); });
+    const nm = enc.encode(pth);
+    if (nm.length > 65535) throw new Error('Chemin trop long pour le format ZIP.');
+    const crc = await crc32(f, n => { done += n; onp(Math.round(done / total * 100)); });
     const h = new DataView(new ArrayBuffer(30));
     h.setUint32(0, 0x04034b50, true); h.setUint16(4, 20, true); h.setUint16(6, 0x0800, true); h.setUint16(10, tt, true); h.setUint16(12, dd, true);
     h.setUint32(14, crc, true); h.setUint32(18, f.size, true); h.setUint32(22, f.size, true); h.setUint16(26, nm.length, true);
@@ -988,7 +1019,7 @@ else {
         try { await Promise.race([ready, sleep(30000).then(() => { throw Error('Aucune réponse du destinataire.'); })]); }
         finally { clearInterval(helloRetry); }
         if (s.finished || gen !== s.activeGen) return;
-        $('title').textContent = 'Envoi en cours'; t0 = 0;
+        $('title').textContent = 'Envoi en cours'; resetProgress();
         $('pstat').textContent = 'Envoi fiable : contrôle des blocs et confirmation à la réception.';
         for (let i = s.nextIndex; i < s.items.length; i++) {
           if (s.finished || gen !== s.activeGen) return;

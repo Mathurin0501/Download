@@ -10,8 +10,29 @@ const MAGIC = 0x52543144; // "RT1D"
 const HEADER_SIZE = 12;
 const DEFAULT_CHUNK_SIZE = 16 * 1024 - HEADER_SIZE;
 const ACK_INTERVAL = 256 * 1024;
-const WINDOW_SIZE = 2 * 1024 * 1024;
-const MAX_BUFFERED = 2 * 1024 * 1024;
+// Back-pressure adaptive: PCs can keep a wider window, phones stay conservative.
+const MOBILE_DEVICE = typeof navigator !== 'undefined' &&
+  /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || '');
+const DEFAULT_WINDOW_SIZE = MOBILE_DEVICE ? 2 * 1024 * 1024 : 8 * 1024 * 1024;
+const DEFAULT_MAX_BUFFERED = MOBILE_DEVICE ? 1024 * 1024 : 4 * 1024 * 1024;
+const OPFS_WRITE_BATCH = 512 * 1024;
+const MEMORY_SINK_LIMIT = MOBILE_DEVICE ? 8 * 1024 * 1024 : 32 * 1024 * 1024;
+let opfsCleanupStarted = false;
+async function cleanupStaleOPFS(dir) {
+  if (opfsCleanupStarted) return;
+  opfsCleanupStarted = true;
+  // The same origin may have another active tab. Only remove files older than 48h.
+  try {
+    const expiry = Date.now() - 48 * 3600 * 1000;
+    for await (const [name, handle] of dir.entries()) {
+      if (!/^rt1-[a-zA-Z0-9-]+\.partial$/.test(name) || handle.kind !== 'file') continue;
+      try {
+        const file = await handle.getFile();
+        if (file.lastModified < expiry) await dir.removeEntry(name);
+      } catch (_) {}
+    }
+  } catch (_) {}
+}
 const WAIT_INTERVAL_MS = 20;
 const TRANSFER_TIMEOUT_MS = 60000;
 
@@ -72,22 +93,34 @@ function decodeFrame(buffer) {
 function storageAvailable() {
   return Boolean(globalThis.navigator?.storage?.getDirectory);
 }
-async function createSink(id, preferDisk) {
-  if (preferDisk && storageAvailable()) {
+async function createSink(id, preferDisk, size) {
+  if (preferDisk && size > MEMORY_SINK_LIMIT && storageAvailable()) {
     try {
       const dir = await navigator.storage.getDirectory();
+      void cleanupStaleOPFS(dir);
       const fileName = `rt1-${id.replace(/[^a-zA-Z0-9-]/g, '')}.partial`;
       const handle = await dir.getFileHandle(fileName, { create: true });
       const writer = await handle.createWritable({ keepExistingData: false });
+      let pending = [], pendingLength = 0;
+      const flush = async () => {
+        if (!pendingLength) return;
+        const blob = new Blob(pending);
+        pending = []; pendingLength = 0;
+        await writer.write(blob);
+      };
       return {
         kind: 'opfs', dir, handle, writer, fileName,
-        async append(bytes) { await writer.write(bytes); },
+        async append(bytes) {
+          pending.push(bytes.slice()); pendingLength += bytes.byteLength;
+          if (pendingLength >= OPFS_WRITE_BATCH) await flush();
+        },
         async finish(name, type) {
+          await flush();
           await writer.close();
           const file = await handle.getFile();
           return new File([file], name, { type });
         },
-        async abort() { try { await writer.abort(); } catch {} try { await dir.removeEntry(fileName); } catch {} }
+        async abort() { pending.length = 0; pendingLength = 0; try { await writer.abort(); } catch {} try { await dir.removeEntry(fileName); } catch {} }
       };
     } catch (e) {
       // Private browsing / unsupported quota may make OPFS inaccessible.
@@ -104,7 +137,8 @@ async function createSink(id, preferDisk) {
 
 /**
  * @param {{onProgress?: Function, onFileReceived?: Function, onError?: Function,
- *          onStatus?: Function, preferDisk?: boolean, chunkSize?: number}} options
+ *          onStatus?: Function, preferDisk?: boolean, chunkSize?: number,
+ *          windowBytes?: number, maxBufferedBytes?: number}} options
  *
  * Create one instance per peer. Attach a *reliable and ordered* WebRTC
  * RTCDataChannel created by your existing connection / pairing code.
@@ -118,6 +152,12 @@ export class ReliableTransfer {
     this.onStatus = options.onStatus || (() => {});
     this.preferDisk = options.preferDisk !== false;
     this.configuredChunkSize = options.chunkSize || null;
+    this.windowBytes = options.windowBytes || DEFAULT_WINDOW_SIZE;
+    this.maxBufferedBytes = options.maxBufferedBytes || DEFAULT_MAX_BUFFERED;
+    if (!Number.isSafeInteger(this.windowBytes) || this.windowBytes < 262144 ||
+        !Number.isSafeInteger(this.maxBufferedBytes) || this.maxBufferedBytes < 65536) {
+      throw new RangeError('Limites de transfert invalides.');
+    }
     this.channel = null;
     this.sender = null;
     this.receiver = null;
@@ -148,7 +188,7 @@ export class ReliableTransfer {
     this.channel.binaryType = 'arraybuffer';
     this.chunkSize = Math.min(this.configuredChunkSize || chooseChunkSize(peerConnection), 64 * 1024 - HEADER_SIZE);
     if (this.chunkSize < 1024) throw new Error('Taille des blocs invalide.');
-    channel.bufferedAmountLowThreshold = Math.min(MAX_BUFFERED / 2, 512 * 1024);
+    channel.bufferedAmountLowThreshold = Math.min(this.maxBufferedBytes / 2, 512 * 1024);
     const onMessage = e => {
       // Serialize asynchronous disk writes to preserve chunk order and ACK semantics.
       this.receiveQueue = this.receiveQueue.then(() => this.handleMessage(e.data)).catch(async err => {
@@ -231,8 +271,8 @@ export class ReliableTransfer {
       for (let i = startChunk; i < totalChunks; i++) {
         const offset = i * chunkSize;
         // Limit both native WebRTC buffering and unacknowledged receiver work.
-        await this.waitFor(() => this.channel.bufferedAmount <= MAX_BUFFERED &&
-          offset - state.acknowledged <= WINDOW_SIZE);
+        await this.waitFor(() => this.channel.bufferedAmount <= this.maxBufferedBytes &&
+          offset - state.acknowledged <= this.windowBytes);
         const bytes = new Uint8Array(await file.slice(offset, Math.min(offset + chunkSize, file.size)).arrayBuffer());
         const packet = frameFor(i, bytes);
         if (!this.isConnected || this.channel !== state.channel) throw new Error('Connexion interrompue pendant l’envoi.');
@@ -295,7 +335,7 @@ export class ReliableTransfer {
           this.sendControl({ type: 'accept', id, offset: this.receiver.receivedBytes });
           break;
         }
-        const sink = await createSink(id, this.preferDisk);
+        const sink = await createSink(id, this.preferDisk, size);
         this.receiver = { id, name: safeName(name), size, mime: String(mime || ''), chunkSize,
           sink, receivedBytes: 0, lastAck: 0, nextIndex: 0, finished: false, failed: null };
         this.onStatus({ state: 'receiving', name: this.receiver.name, size });
