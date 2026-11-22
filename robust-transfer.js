@@ -333,9 +333,9 @@ export class ReliableTransfer {
           return;
         }
         const file = await r.sink.finish(r.name, r.mime);
-        r.finished = true;
         try { await this.onFileReceived(file, { id: r.id, name: r.name, size: r.size, mime: r.mime }); }
-        catch (e) { this.reportError(e); }
+        catch (e) { this.sendControlSafe({ type: 'error', id: r.id, message: 'Échec de sauvegarde sur le récepteur.' }); throw e; }
+        r.finished = true;
         this.sendControl({ type: 'complete', id: r.id });
         this.onStatus({ state: 'received', name: r.name, size: r.size });
         break;
