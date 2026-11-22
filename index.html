@@ -392,6 +392,9 @@ const PEER_CFG = { config: {
 } };
 const NET_TIP = ' Si vos PC sont sur le même routeur, vérifiez l’isolation Wi-Fi / réseau invité, le VPN ou le pare-feu.';
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+// En mode PC, reutiliser le pair PeerJS deja connecte pour ne pas ouvrir
+// une seconde connexion de signalisation dans le meme onglet.
+let idlePeer = null;
 /* ============ RÉCEPTEUR : protocole vérifié, reprise automatique ============ */
 const HOME_T = 'Envoyez ou recevez', HOME_S = 'D\'un téléphone à l\'autre, sans câble ni compte.';
 
@@ -399,7 +402,7 @@ function receive(id) {
   $('title').textContent = 'Réception'; $('sub').textContent = 'Connexion à l\'autre appareil…';
   setChip('En attente…', 0); document.querySelectorAll('.fs').forEach(e => e.textContent = '');
   show('prog'); keepAwake(); t0 = 0;
-  const peer = new Peer(undefined, PEER_CFG);
+  const peer = idlePeer && !idlePeer.destroyed ? idlePeer : new Peer(undefined, PEER_CFG);
   let conn = null, attempts = 0, generation = 0, retryTimer = null, connectTimer = null;
   let finished = false, manifest = null, completedBytes = 0;
   let everConnected = false, lastIssue = '', missingCodeErrors = 0;
@@ -557,7 +560,7 @@ function receive(id) {
     if (e.type === 'peer-unavailable') {
       missingCodeErrors++;
       if (missingCodeErrors >= 2) {
-        stopWithError('Code introuvable ou expiré. Sur le PC émetteur, annulez, créez un nouveau code et saisissez-le sur ce PC.');
+        stopWithError('Code introuvable ou expiré. Sur le PC émetteur, utilisez le bouton « Copier le lien » puis collez ce lien directement dans la barre d’adresse du second PC.');
       } else retry('Code momentanément introuvable. Vérifiez les 6 caractères affichés sur l’autre PC.');
     } else if (['network', 'server-error', 'socket-error', 'socket-closed'].includes(e.type)) {
       if (peer.disconnected && !peer.destroyed) { try { peer.reconnect(); } catch (_) {} }
@@ -569,6 +572,9 @@ function receive(id) {
     if (finished || peer.destroyed) return;
     try { peer.reconnect(); } catch (e) { retry('Le service de connexion a été interrompu.'); }
   });
+  // Le pair existe deja et son evenement 'open' est passe : demarrer tout de suite.
+  // Le parcours QR (pair cree ici) continue d'attendre son propre evenement 'open'.
+  if (peer.open) connect();
 }
 
 /* ============ MODES : téléphone / PC à PC ============ */
@@ -730,7 +736,7 @@ if (targetId) receive(targetId);
 /* ============ ÉMETTEUR : accusés de réception et reprise ============ */
 else {
   let items = null, peerId = null, linkText = null, session = null;
-  const peer = new Peer(undefined, PEER_CFG);
+  const peer = idlePeer = new Peer(undefined, PEER_CFG);
   peer.on('open', id => { peerId = id; if (items && !session?.activeConn?.open && mode === 'phone') showQR(); });
   peer.on('error', e => {
     if (e.type === 'network' && peer.disconnected && !peer.destroyed) {
@@ -874,7 +880,10 @@ else {
 
   /* --- Code à 6 caractères (PC à PC et liens) : interface inchangée --- */
   let pcPeer = null, pcTok = 0, pcCode = '';
-  const pcLink = () => location.origin + location.pathname + '#tqrx-' + pcCode;
+  // En mode PC, le lien complet utilise l'identifiant aleatoire du pair principal.
+  // Il contourne l'enregistrement d'un second identifiant court sur PeerJS.
+  // Le code a 6 caracteres reste operationnel comme voie simple de partage.
+  const pcLink = () => location.origin + location.pathname + '#' + (peer.open && peerId ? peerId : 'tqrx-' + pcCode);
   const spaced = c => c.slice(0, 3) + ' ' + c.slice(3);
   function openCode(onReady) {
     const tok = ++pcTok; let tries = 0;
@@ -905,7 +914,7 @@ else {
   }
   async function startPcShare(en, root) {
     if (!(await setItems(en, root))) return;
-    openCode(code => { $('codeBig').textContent = spaced(code); $('title').textContent = 'Code de transfert'; $('sub').textContent = 'Saisissez-le sur l\'autre appareil.'; show('code'); keepAwake(); });
+    openCode(code => { $('codeBig').textContent = spaced(code); $('title').textContent = 'Code de transfert'; $('sub').textContent = 'Saisissez le code sur l\'autre PC, ou utilisez « Copier le lien ».'; show('code'); keepAwake(); });
   }
   function startLinkShare(text) {
     linkText = text; items = null; makeSession();
