@@ -3,9 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob:; media-src 'self' blob: data:; connect-src 'self' https: wss:; worker-src 'self' blob:; manifest-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; upgrade-insecure-requests">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob:; media-src 'self' blob: data:; connect-src 'self' https: wss:; worker-src 'self' blob:; manifest-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; upgrade-insecure-requests">
 <meta name="referrer" content="strict-origin-when-cross-origin">
-<meta http-equiv="Permissions-Policy" content="camera=(self), microphone=(), geolocation=(), payment=(), usb=()">
 <meta name="theme-color" content="#0e0b2b">
 <meta name="description" content="Transférez facilement des fichiers, photos, vidéos et documents entre téléphone, ordinateur et tablette. Partage direct par QR code, code temporaire ou lien, sans câble ni création de compte.">
 <meta name="robots" content="index, follow, max-image-preview:large">
@@ -270,6 +269,7 @@ footer{text-align:center;color:var(--mute);font-size:12px;margin-top:18px;opacit
       <div><b id="amt">–</b><small>Transféré</small></div>
     </div>
     <p class="hint" id="pstat">Gardez cette page ouverte et l'écran allumé.</p>
+    <div id="progShare" hidden><button class="btn ghost" id="progQrBtn" aria-expanded="false">Afficher le QR code de partage</button><div class="qrwrap" id="progQrWrap" hidden style="margin-top:18px"><div class="qrtile" id="progQr"></div></div></div>
   </div>
 
   <!-- 4. fin -->
@@ -277,6 +277,7 @@ footer{text-align:center;color:var(--mute);font-size:12px;margin-top:18px;opacit
     <svg class="check" viewBox="0 0 100 100"><circle cx="50" cy="50" r="46"/><path d="M30 52l14 14 27-30"/></svg>
     <h2 id="dtitle">Terminé !</h2>
     <p class="msg" id="dmsg"></p>
+    <div id="doneShare" hidden><button class="btn ghost" id="doneQrBtn" aria-expanded="false">Afficher le QR code de partage</button><div class="qrwrap" id="doneQrWrap" hidden style="margin-top:18px"><div class="qrtile" id="doneQr"></div></div></div>
     <div class="dlist" id="dlist" hidden></div>
     <div class="row"><a class="btn" id="openLnk" hidden target="_blank" rel="noopener noreferrer">Ouvrir le lien</a><button class="btn ghost" id="copyRecv" hidden>Copier le lien</button><button class="btn ghost" id="again">Nouveau transfert</button></div>
   </div>
@@ -363,9 +364,12 @@ function resetProgress() {
 }
 
 /* QR code stylé : points ronds, repères arrondis, dégradé et logo central */
+let qrSerial = 0;
 function qrSvg(text) {
+  if (typeof globalThis.qrcode !== 'function') throw new Error('Le générateur QR est indisponible. Réessayez avec une connexion Internet.');
+  const gradient = 'qg-' + (++qrSerial);
   const qr = qrcode(0, 'H'); qr.addData(text); qr.make();
-  const n = qr.getModuleCount(), q = 3, S = n + q * 2, mid = n / 2 + q;
+  const n = qr.getModuleCount(), q = 4, S = n + q * 2, mid = n / 2 + q;
   const half = Math.max(3, Math.round(n * 0.09));
   const finder = (r, c) => (r < 7 && c < 7) || (r < 7 && c >= n - 7) || (r >= n - 7 && c < 7);
   const logo = (r, c) => Math.abs(r + .5 + q - mid) <= half + 1 && Math.abs(c + .5 + q - mid) <= half + 1;
@@ -374,16 +378,16 @@ function qrSvg(text) {
     if (qr.isDark(r, c) && !finder(r, c) && !logo(r, c)) dots += `<circle cx="${c+q+.5}" cy="${r+q+.5}" r=".48"/>`;
   let eyes = '';
   [[0,0],[n-7,0],[0,n-7]].forEach(([x,y]) => {
-    eyes += `<rect x="${x+q+.5}" y="${y+q+.5}" width="6" height="6" rx="2" fill="none" stroke="url(#qg)" stroke-width="1"/>`;
-    eyes += `<rect x="${x+q+2}" y="${y+q+2}" width="3" height="3" rx="1" fill="url(#qg)"/>`;
+    eyes += `<rect x="${x+q+.5}" y="${y+q+.5}" width="6" height="6" rx="2" fill="none" stroke="url(#${gradient})" stroke-width="1"/>`;
+    eyes += `<rect x="${x+q+2}" y="${y+q+2}" width="3" height="3" rx="1" fill="url(#${gradient})"/>`;
   });
   const k = half * 0.32;
   return `<svg viewBox="0 0 ${S} ${S}" xmlns="http://www.w3.org/2000/svg" shape-rendering="geometricPrecision">
-  <defs><linearGradient id="qg" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="${S}" y2="${S}"><stop offset="0" stop-color="#1e1b8f"/><stop offset=".55" stop-color="#4c1d95"/><stop offset="1" stop-color="#86198f"/></linearGradient></defs>
+  <defs><linearGradient id="${gradient}" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="${S}" y2="${S}"><stop offset="0" stop-color="#1e1b8f"/><stop offset=".55" stop-color="#4c1d95"/><stop offset="1" stop-color="#86198f"/></linearGradient></defs>
   <rect width="${S}" height="${S}" fill="#fff"/>
-  <g fill="url(#qg)">${dots}</g>${eyes}
+  <g fill="url(#${gradient})">${dots}</g>${eyes}
   <circle cx="${mid}" cy="${mid}" r="${half+.7}" fill="#fff"/>
-  <circle cx="${mid}" cy="${mid}" r="${half}" fill="url(#qg)"/>
+  <circle cx="${mid}" cy="${mid}" r="${half}" fill="url(#${gradient})"/>
   <g transform="translate(${mid} ${mid}) scale(${k})" fill="none" stroke="#fff" stroke-width=".9" stroke-linecap="round" stroke-linejoin="round"><path d="M0 2.4V-2.4M-2 -.4L0 -2.4L2 -.4"/></g>
   </svg>`;
 }
@@ -462,7 +466,7 @@ if (/iphone|ipad|ipod/i.test(navigator.userAgent) && !standalone) $('iosHint').h
 const HK = 'transfertqr_hist';
 const UP = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5m0 0-6 6m6-6 6 6"/></svg>';
 const DOWN = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14m0 0-6-6m6 6 6-6"/></svg>';
-const loadH = () => { try { return JSON.parse(localStorage.getItem(HK)) || []; } catch (e) { return []; } };
+const loadH = () => { try { const a=JSON.parse(localStorage.getItem(HK)); return Array.isArray(a)?a.filter(x=>x && typeof x.name==='string' && ['sent','recv'].includes(x.dir) && Number.isFinite(x.size) && Number.isFinite(x.t)):[]; } catch (e) { return []; } };
 const saveH = a => { try { localStorage.setItem(HK, JSON.stringify(a.slice(0, 50))); } catch (e) {} };
 function addH(dir, name, size, ok) { const a = loadH(); a.unshift({ dir, name, size, ok, t: Date.now() }); saveH(a); renderH(); }
 function fmtD(t) {
@@ -500,9 +504,9 @@ renderH();
 
 // Connexions P2P directes uniquement : aucun serveur TURN.
 const PEER_CFG = { debug: 1, config: { iceServers: [
-  {urls: ['stun:stun.l.google.com:19302','stun:stun1.l.google.com:19302','stun:stun2.l.google.com:19302','stun:stun3.l.google.com:19302','stun:stun4.l.google.com:19302']},
-  {urls: ['stun:stun.cloudflare.com:3478','stun:global.stun.twilio.com:3478']}
-], iceTransportPolicy:'all', iceCandidatePoolSize: 6 } };
+  {urls: ['stun:stun.l.google.com:19302','stun:stun1.l.google.com:19302','stun:stun2.l.google.com:19302']},
+  {urls: 'stun:stun.cloudflare.com:3478'}
+], iceTransportPolicy:'all', iceCandidatePoolSize: 2 } };
 const MAX_RECIPIENTS = 5;
 const SHARE_TTL = 30 * 60 * 1000;
 const readRecord = key => {try{return JSON.parse(localStorage.getItem(key));}catch(_){return null;}};
@@ -510,7 +514,7 @@ const writeRecord = (key,value) => {try{localStorage.setItem(key,JSON.stringify(
 const removeRecord = key => {try{localStorage.removeItem(key);}catch(_){}};
 const secureId = () => crypto.randomUUID ? crypto.randomUUID() : [...crypto.getRandomValues(new Uint8Array(16))].map(x=>x.toString(16).padStart(2,'0')).join('');
 const NET_TIP = ' Sur Opera, vérifiez que le VPN est désactivé. Essayez Edge/Chrome sur les deux PC. Un réseau invité ou un pare-feu peuvent également bloquer WebRTC.';
-const APP_BUILD = 'V10-20261128';
+const APP_BUILD = 'V11-20261128';
 let lastNetworkDiagnostic = '';
 $('copyDiag').onclick = e => copyTxt(e.currentTarget, lastNetworkDiagnostic);
 
@@ -522,6 +526,7 @@ let idlePeer = null;
 const HOME_T = 'Envoyez ou recevez', HOME_S = 'D\'un téléphone à l\'autre, sans câble ni compte.';
 
 function receive(id) {
+  $('progShare').hidden=true; $('doneShare').hidden=true;
   if (!/^[a-zA-Z0-9_-]{6,150}$/.test(id)) {fail('Code invalide.');return;}
   const resumeKey = 'tqrx-recv:' + id;
   let record = readRecord(resumeKey);
@@ -533,6 +538,7 @@ function receive(id) {
   setChip('En attente…', 0); document.querySelectorAll('.fs').forEach(e => e.textContent = '');
   show('prog'); keepAwake(); resetProgress();
   $('copyDiag').hidden = true; lastNetworkDiagnostic = '';
+  if(typeof globalThis.Peer !== 'function'){fail('Service de connexion indisponible. Vérifiez votre connexion Internet et rechargez la page.');return;}
   const peer = idlePeer && !idlePeer.destroyed ? idlePeer : new Peer(undefined, PEER_CFG);
   const attemptsDiagnostic = [];
   const captureDiagnosis = async (reason, c) => {
@@ -768,7 +774,7 @@ function receive(id) {
     if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
     connect();
   });
-  peer.on('error', e => {
+  peer?.on('error', e => {
     if (finished) return;
     if (e.type === 'peer-unavailable') {
       missingCodeErrors++;
@@ -781,7 +787,7 @@ function receive(id) {
     } else if (e.type === 'webrtc') retry('Échec de négociation WebRTC. Vérifiez les pare-feu et la configuration de votre réseau.');
     else stopWithError('Connexion impossible (' + e.type + ').');
   });
-  peer.on('disconnected', () => {
+  peer?.on('disconnected', () => {
     if (finished || peer.destroyed) return;
     try { peer.reconnect(); } catch (e) { retry('Le service de connexion a été interrompu.'); }
   });
@@ -820,27 +826,32 @@ async function copyTxt(btn, text) {
 }
 
 /* ============ SCANNER DE QR CODE ============ */
-let stream = null, scanning = false;
-function stopScan() { scanning = false; if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; } }
+let stream = null, scanning = false, scanGeneration=0;
+function stopScan() { scanGeneration++; scanning = false; if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; } }
 function parseId(txt) {
   try { const h = new URL(txt).hash.slice(1); if (h) return h; } catch (e) {}
   return /^[\w-]{10,}$/.test(txt.trim()) ? txt.trim() : null;
 }
 async function startScan() {
+  stopScan(); const currentScan=scanGeneration;
   $('title').textContent = 'Scanner le QR code';
   $('sub').textContent = 'Visez le QR code affiché sur l\'autre téléphone.';
   $('scanerr').textContent = ''; show('scan');
+  if(typeof globalThis.jsQR !== 'function'){ $('scanerr').textContent='Scanner indisponible. Utilisez le code ou le lien en mode PC à PC.'; return; }
   try {
-    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } }, audio: false });
+    const candidate = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } }, audio: false });
+    if(currentScan!==scanGeneration){candidate.getTracks().forEach(t=>t.stop());return;}
+    stream=candidate;
   } catch (e) {
     $('scanerr').textContent = 'Caméra inaccessible. Autorisez l\'accès à la caméra dans votre navigateur, puis réessayez.';
     return;
   }
-  const v = $('cam'); v.srcObject = stream; await v.play();
+  const v = $('cam'); v.srcObject = stream; try { await v.play(); } catch(e) { stopScan(); $('scanerr').textContent='Impossible de démarrer la caméra.'; return; }
   const cv = document.createElement('canvas'), cx = cv.getContext('2d', { willReadFrequently: true });
+  if(currentScan!==scanGeneration)return;
   scanning = true;
   const tick = () => {
-    if (!scanning) return;
+    if (!scanning || currentScan!==scanGeneration) return;
     if (v.readyState >= 2 && v.videoWidth) {
       const k = Math.min(1, 640 / v.videoWidth);
       cv.width = Math.round(v.videoWidth * k); cv.height = Math.round(v.videoHeight * k);
@@ -958,14 +969,14 @@ else {
   // et le code PC à PC. L'ancienne version ouvrait deux PeerJS émetteurs.
   // Le code aléatoire est éphémère : une nouvelle page crée un autre code.
   const oneTimeCode = genCode();
-  const peer = idlePeer = new Peer('tqrx-' + oneTimeCode, PEER_CFG);
+  const peer = idlePeer = typeof globalThis.Peer === 'function' ? new Peer('tqrx-' + oneTimeCode, PEER_CFG) : null;
   let pendingPcReady = null;
-  peer.on('open', id => {
+  peer?.on('open', id => {
     peerId = id;
     if (pendingPcReady) { const cb = pendingPcReady; pendingPcReady = null; cb(oneTimeCode); }
-    if (items && !session?.activeConn?.open && mode === 'phone') showQR();
+    if (items && session && !session.finished && !session.expired && !session.activeConn?.open && mode === 'phone' && $('v-pick').hidden === false) showQR();
   });
-  peer.on('error', e => {
+  peer?.on('error', e => {
     if (e.type === 'network' && peer.disconnected && !peer.destroyed) {
       try { peer.reconnect(); } catch (_) {}
     } else if (!session?.activeConn || !session.activeConn.open) {
@@ -974,7 +985,7 @@ else {
       } else $('sub').textContent = 'Service de connexion : ' + e.type + '. Rechargez si nécessaire.';
     }
   });
-  peer.on('disconnected', () => { if (!peer.destroyed) { try { peer.reconnect(); } catch (e) {} } });
+  peer?.on('disconnected', () => { if (!peer.destroyed) { try { peer.reconnect(); } catch (e) {} } });
 
   const label = it => it.length > 1 ? it.length + ' fichiers' : it[0].file.name;
   const total = it => it.reduce((a, x) => a + x.file.size, 0);
@@ -994,7 +1005,7 @@ else {
     setChip(label(it), total(it), it[0].file._n > 1 ? it[0].file._n + ' fichiers' : '');
     return true;
   };
-  const pick = async (en, root) => { if (!(await setItems(en, root))) return; if (peerId) showQR(); else $('sub').textContent = 'Connexion au service…'; };
+  const pick = async (en, root) => { if (!peer) { fail('Service de connexion indisponible. Rechargez la page.'); return; } if (!(await setItems(en, root))) return; if (peerId) showQR(); else $('sub').textContent = 'Connexion au service…'; };
   $('file').onchange = e => { pick(...fromInput(e.target.files)); e.target.value = ''; };
   $('dirBtn').onclick = () => $('dir').click();
   $('dir').onchange = e => { pick(...fromInput(e.target.files)); e.target.value = ''; };
@@ -1002,8 +1013,11 @@ else {
   $('change').onclick = () => { closeSession(session); items = null; session = null; goHome(); };
   $('again').onclick = () => location.href = location.pathname;
 
+  function renderQr(id, url) {
+    try { $(id).innerHTML = qrSvg(url); return true; } catch(e) { $(id).textContent = 'QR indisponible : utilisez le code ou le lien.'; return false; }
+  }
   function showQR() {
-    $('qr').innerHTML = qrSvg(location.origin + location.pathname + '#' + peerId);
+    if(!renderQr('qr',pcLink())) { openCode(code => { $('codeBig').textContent=spaced(code); renderQr('pcqr',pcLink()); show('code'); }); return; }
     $('title').textContent = 'Scannez pour recevoir';
     $('sub').textContent = 'Ouvrez l\'appareil photo de l\'autre téléphone. Plusieurs appareils peuvent scanner ce QR code.';
     show('qr'); keepAwake();
@@ -1012,8 +1026,8 @@ else {
     const engines=[...s.recipients.values()].filter(r=>r.running&&r.transfer).map(r=>r.transfer);
     if(!engines.length) return;
     const mobile=/Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
-    const totalWindow=(mobile?6:24)*1024*1024;
-    const totalBuffer=(mobile?2:8)*1024*1024;
+    const totalWindow=(mobile?4:12)*1024*1024;
+    const totalBuffer=(mobile?2:6)*1024*1024;
     const minWindow=mobile?786432:1572864;
     const minBuffer=mobile?393216:786432;
     for(const engine of engines){
@@ -1022,8 +1036,19 @@ else {
       if(engine.channel)engine.channel.bufferedAmountLowThreshold=Math.min(engine.maxBufferedBytes/2,1048576);
     }
   };
+  for(const prefix of ['prog','done']) {
+    $(prefix+'QrBtn').onclick=()=>{
+      if(!session || session.finished || session.expired || !peerId) return;
+      const wrap=$(prefix+'QrWrap'), showQr=wrap.hidden;
+      if(showQr) renderQr(prefix+'Qr',pcLink());
+      wrap.hidden=!showQr;
+      $(prefix+'QrBtn').textContent=showQr?'Masquer le QR code':'Afficher le QR code de partage';
+      $(prefix+'QrBtn').setAttribute('aria-expanded',String(showQr));
+    };
+  }
   const updateRecipients = s => {
     if(s!==session || s.finished)return;
+    for(const prefix of ['prog','done']) $(prefix+'Share').hidden=!!s.expired || s.recipients.size>=MAX_RECIPIENTS;
     const all=[...s.recipients.values()], running=all.filter(r=>r.running), complete=all.filter(r=>r.complete);
     const waiting=all.filter(r=>!r.complete&&!r.running&&!s.expired);
     if(s.expired && !complete.length && !running.length){fail('Code expiré. Sélectionnez les fichiers pour un nouveau partage.');return;}
@@ -1093,13 +1118,14 @@ else {
       finally{transfer?.detachChannel();if(r.conn===c){r.running=false;r.conn=null;r.transfer=null;s.lastActivity=Date.now();allocateBandwidth(s);try{c.close();}catch(_){}updateRecipients(s);}if(s.expired&&![...s.recipients.values()].some(x=>x.running))closeSession(s);}
     });
   });
-  serve(peer);
+  if(peer) serve(peer);
 
   /* --- Un seul pair émetteur et un code à 6 caractères (PC à PC / liens / QR) --- */
   let pcCode = oneTimeCode;
   const pcLink = () => location.origin + location.pathname + '#' + peerId;
   const spaced = c => c.slice(0, 3) + ' ' + c.slice(3);
   function openCode(onReady) {
+    if (!peer) { fail('Service de connexion indisponible. Vérifiez votre connexion Internet et rechargez la page.'); return; }
     if (peer.open && peerId) onReady(pcCode);
     else {
       pendingPcReady = onReady;
@@ -1108,18 +1134,18 @@ else {
   }
   async function startPcShare(en, root) {
     if (!(await setItems(en, root))) return;
-    openCode(code => { $('codeBig').textContent = spaced(code); $('pcqr').innerHTML = qrSvg(pcLink()); $('title').textContent = 'Code de transfert'; $('sub').textContent = 'Saisissez le code sur l\'autre PC, partagez le lien, ou faites scanner le QR code.'; show('code'); keepAwake(); });
+    openCode(code => { $('codeBig').textContent = spaced(code); renderQr('pcqr',pcLink()); $('title').textContent = 'Code de transfert'; $('sub').textContent = 'Saisissez le code sur l\'autre PC, partagez le lien, ou faites scanner le QR code.'; show('code'); keepAwake(); });
   }
   function startLinkShare(text) {
     linkText = text; items = null; makeSession();
     openCode(code => {
-      $('lnk').textContent = text; $('lqr').innerHTML = qrSvg(pcLink()); $('lcodeBig').textContent = spaced(code);
-      $('title').textContent = 'Lien prêt'; $('sub').textContent = 'Scannez le QR code ou saisissez le code. Plusieurs appareils peuvent l'utiliser.'; show('lcode'); keepAwake();
+      $('lnk').textContent = text; renderQr('lqr',pcLink()); $('lcodeBig').textContent = spaced(code);
+      $('title').textContent = 'Lien prêt'; $('sub').textContent = 'Scannez le QR code ou saisissez le code. Plusieurs appareils peuvent l\'utiliser.'; show('lcode'); keepAwake();
     });
   }
   const cancelCode = () => {
     pendingPcReady = null;
-    closeSession(session); linkText = null; session = null; goHome();
+    closeSession(session); items = null; linkText = null; session = null; goHome();
   };
   $('pcfile').onchange = e => { startPcShare(...fromInput(e.target.files)); e.target.value = ''; };
   $('pcdirBtn').onclick = () => $('pcdir').click();

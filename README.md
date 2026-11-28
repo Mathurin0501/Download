@@ -1,32 +1,23 @@
-# Transfert QR — V10 (version de test)
+# Transfert QR — V11 (correctif de la V10)
 
-Application statique pour GitHub Pages. Aucune infrastructure supplémentaire, aucun TURN. Le service de signalisation PeerJS existant et les services STUN publics restent nécessaires. Les fichiers circulent directement via WebRTC quand les réseaux le permettent.
+Application statique pour GitHub Pages, sans TURN ni serveur supplémentaire à héberger. PeerJS et les services STUN publics existants restent nécessaires pour la mise en relation. Les fichiers circulent en WebRTC direct lorsque les réseaux le permettent.
 
-## Modifications
+## Correctifs
 
-- Vitesse : buffers et fenêtres de transfert élargis, meilleure répartition de bande passante entre destinataires, QR multi-partage en mode PC, et configuration STUN élargie pour accélérer l'établissement des connexions directes.
-- Sécurité : ajout d'une Content Security Policy, d'une politique de permissions, d'une politique de referrer et maintien des validations strictes des métadonnées et des tampons.
-- Partage multi-destinataires : en mode PC à PC, l'écran de code affiche désormais aussi un QR code scannable par plusieurs appareils utilisant le même partage.
-
-
-- HTML, CSS, images et boutons inchangés. Seuls les textes d’état évoluent.
-- Jusqu’à cinq destinataires par session, avec le même code. Le débit et les fenêtres d’envoi sont répartis entre les connexions actives. Le code reste visible dans le sous-titre pendant et après les transferts.
-- Stockage OPFS par worker dédié et contrôle du quota. En l’absence de stockage disque compatible, le total des fichiers conservés en RAM est plafonné à 8 Mio sur mobile et 32 Mio sur ordinateur, hors mémoire tampon de transport et surcharge du navigateur. Un fichier trop gros est refusé plutôt que chargé entièrement en RAM.
-- Les données écrites sur disque sont synchronisées avant les accusés de réception. Après fermeture/rechargement du récepteur, rouvrir le même lien ou saisir le même code dans le même profil de navigateur, tant que l’émetteur conserve la session et le fichier source. Une portion non confirmée peut être retransmise. Les métadonnées sont conservées dans localStorage ; les données sont conservées dans OPFS. Sans OPFS, la reprise après fermeture n’est pas disponible.
-- Si l’émetteur ferme sa page, le code et le fichier source ne sont pas restaurés : créer un nouveau partage et recommencer. Cette version ne met pas en cache les fichiers source, afin d’éviter une seconde copie potentiellement très volumineuse.
-- SHA-256 sur chaque bloc, validation des métadonnées et accusés, limitation des connexions et des buffers, expiration après une période d’inactivité d’au moins 30 minutes. Aucun nouveau mot de passe ou code de vérification. Le code de partage reste un secret d’accès : toute personne qui le possède peut demander le fichier.
-- Les fichiers reçus et checkpoints de plus de 48 h sont éligibles au nettoyage lors d’une réception ultérieure. La durée réelle dépend aussi de la gestion du stockage par le navigateur. Le navigateur peut supprimer les données locales ; conserver les fichiers téléchargés.
-- STUN Google et Cloudflare, tentatives ICE renouvelées par reconnexion, délai de négociation augmenté, reprise au retour du réseau. Certains NAT/pare-feu restent incompatibles avec un transfert direct, sans TURN.
-- Le protocole reste compatible avec la base V9. Les deux appareils doivent tout de même être mis à jour pour profiter du QR multi-partage en mode PC et des réglages de performance. Le ZIP classique conserve sa limite d’environ 4 Go ; envoyer les fichiers séparément au-delà.
+- Corrige l'apostrophe non échappée dans le texte du mode Liens, qui empêchait l'intégralité du module JavaScript de s'exécuter dans la V10.
+- Navigation entre Téléphone, PC à PC et Liens ; génération des QR dans les trois modes ; si une bibliothèque CDN manque, les boutons de navigation restent utilisables et un message explique le problème.
+- QR de partage affichable pendant et après un envoi, avec le même lien pour jusqu'à cinq destinataires par session. Le CSS d'origine est inchangé ; seuls les contrôles nécessaires au partage ont été ajoutés.
+- Fenêtre globale d'envoi plafonnée à 12 Mio sur PC et 4 Mio sur mobile, et buffer à 6/2 Mio, répartis entre connexions. Ces réglages restent sous le seuil de 16 Mio de la file de réception du moteur. Le débit réel dépend du réseau, du navigateur et du disque.
+- Conserve les contrôles du moteur V9/V10 : SHA-256 et CRC32 par bloc, validations, limite mémoire, stockage OPFS, reprise côté réception. Aucun nouveau code de vérification. Toute personne qui connaît le code de partage peut demander le fichier ; ne le diffuser qu'aux destinataires souhaités.
+- Configuration STUN Google/Cloudflare issue de la V9, sans TURN. CSP conservée, retrait des directives non applicables via une balise meta. La CSP autorise encore les scripts inline et les bibliothèques CDN existantes ; ce n'est pas un audit de sécurité exhaustif.
+- Nouveau cache PWA versionné V11. Historique local conservé lors de la mise à jour normale.
 
 ## Installation
 
-Créer une branche de test dans GitHub, puis remplacer `index.html`, `robust-transfer.js` et `sw.js`, et ajouter `storage-worker.js`. Les icônes et le manifeste peuvent rester en place. Publier la branche de test uniquement si souhaité. Le nouveau service worker renouvelle le cache PWA. Recharger la page sur les deux appareils ; si nécessaire, fermer puis rouvrir les onglets de l’application.
+Remplacer ensemble les fichiers à la racine de la branche GitHub Pages : `index.html`, `robust-transfer.js`, `storage-worker.js`, `sw.js`. Conserver manifeste, icônes et fichier de vérification Google. Le dossier `tests/` et le README sont facultatifs pour le fonctionnement du site. Après publication, attendre la fin du déploiement GitHub Pages, puis recharger sur les deux appareils. Si la V10 est encore affichée, fermer tous les onglets et l'application installée, rouvrir en ligne et actualiser (Ctrl+F5 sur ordinateur). Vérifier dans une fenêtre privée pour distinguer un problème de cache d'un problème de publication. Ne pas effacer le stockage du site si des fichiers partiels ou l'historique doivent être conservés. La V10 ayant un script invalide, son mécanisme de mise à jour côté page ne peut pas fonctionner ; le navigateur peut néanmoins mettre à jour le service worker déjà installé lors des navigations.
 
-## Tests
+## Tests et limites
 
-Node.js 22 : `node --test tests/test_engine.mjs tests/test_persistence.mjs`.
+Node.js 22 : `node --test tests/test_syntax.mjs tests/test_engine.mjs tests/test_persistence.mjs` : 9 tests réussis, dont la nouvelle vérification de syntaxe du module intégré à index.html, l'intégrité des données, deux envois simultanés, la reprise et le rejet des données corrompues. En plus, les trois modes et la génération SVG des QR ont été testés dans Chromium avec le DOM réel, une signalisation simulée et un générateur QR de test. L'interface a également été testée sans les bibliothèques externes. La navigation HTTP(S) de l'environnement a été bloquée ; ces tests isolés ne vérifient pas le CDN réel, PeerJS en ligne, la caméra, la mise à jour PWA réelle ou le débit entre appareils. Le test navigateur réseau fourni dans `tests/test_browser.py` reste à exécuter sur une machine autorisant les connexions locales. Tester d'abord un petit fichier et un partage à plusieurs appareils avant d'utiliser les fichiers volumineux.
 
-Les huit tests simulés ont réussi : intégrité octet par octet, fichier vide, deux envois parallèles, reprise après perte du canal, plafond RAM, rejet des fichiers inattendus, rejet SHA-256 invalide, reprise depuis un checkpoint disque simulé avec une nouvelle instance.
-
-Le test navigateur `python tests/test_browser.py` nécessite Playwright et Chromium (`pip install playwright`, définir `CHROMIUM_PATH` si nécessaire). Son exécution a été bloquée par la politique de navigation de l’environnement. Il reste indispensable de valider sur deux appareils réels avant publication définitive : fichier de 1 à 5 Go, fermeture du récepteur en milieu de transfert, plusieurs récepteurs, Wi-Fi/5G, absence d’OPFS. Les tests simulés ne mesurent ni le débit réel ni la consommation de mémoire native du navigateur. La configuration STUN n’a pas pu être testée sur Internet.
+La reprise après fermeture du récepteur nécessite OPFS et que l'émetteur garde son partage ouvert. Le ZIP classique reste limité à environ 4 Go. Sans relais TURN, certaines configurations NAT et pare-feu empêchent le transfert direct. Aucun débit maximal ne peut être garanti.

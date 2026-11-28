@@ -1,6 +1,6 @@
 /* Transfert QR : mise a jour automatique pour le site et l'application installee.
    Conserve l'interface, les transferts et l'historique (localStorage) intacts. */
-const CACHE = 'transfert-qr-v10-20261128';
+const CACHE = 'transfert-qr-v11-20261128';
 const APP_ASSETS = ['./', './index.html', './robust-transfer.js', './storage-worker.js', './manifest.webmanifest',
   './icon-192.png', './icon-512.png', './apple-touch-icon.png'];
 const CHECK_ASSETS = ['./index.html', './robust-transfer.js', './storage-worker.js'];
