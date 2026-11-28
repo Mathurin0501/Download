@@ -492,15 +492,19 @@ $('htabs').onclick = e => {
 $('hclear').onclick = () => { if (confirm('Effacer tout l\'historique ?')) { saveH([]); renderH(); } };
 renderH();
 
-/*
- * PeerJS 1.5.4 possede une configuration ICE native avec STUN ET TURN.
- * Ne PAS redefinir config.iceServers ici : cela remplacerait les relais TURN
- * par de simples serveurs STUN et rendrait les reseaux restrictifs injoignables.
- * debug:1 donne les erreurs utiles dans la console sans toucher a l'interface.
- */
-const PEER_CFG = { debug: 1 };
+// Connexions P2P directes uniquement : aucun serveur TURN.
+const PEER_CFG = { debug: 1, config: { iceServers: [
+  {urls: ['stun:stun.l.google.com:19302','stun:stun1.l.google.com:19302','stun:stun2.l.google.com:19302']},
+  {urls: 'stun:stun.cloudflare.com:3478'}
+], iceTransportPolicy:'all', iceCandidatePoolSize: 2 } };
+const MAX_RECIPIENTS = 5;
+const SHARE_TTL = 30 * 60 * 1000;
+const readRecord = key => {try{return JSON.parse(localStorage.getItem(key));}catch(_){return null;}};
+const writeRecord = (key,value) => {try{localStorage.setItem(key,JSON.stringify(value));}catch(_){}};
+const removeRecord = key => {try{localStorage.removeItem(key);}catch(_){}};
+const secureId = () => crypto.randomUUID ? crypto.randomUUID() : [...crypto.getRandomValues(new Uint8Array(16))].map(x=>x.toString(16).padStart(2,'0')).join('');
 const NET_TIP = ' Sur Opera, vérifiez que le VPN est désactivé. Essayez Edge/Chrome sur les deux PC. Un réseau invité ou un pare-feu peuvent également bloquer WebRTC.';
-const APP_BUILD = 'V8-20261122';
+const APP_BUILD = 'V9-20261128';
 let lastNetworkDiagnostic = '';
 $('copyDiag').onclick = e => copyTxt(e.currentTarget, lastNetworkDiagnostic);
 
@@ -512,6 +516,13 @@ let idlePeer = null;
 const HOME_T = 'Envoyez ou recevez', HOME_S = 'D\'un téléphone à l\'autre, sans câble ni compte.';
 
 function receive(id) {
+  if (!/^[a-zA-Z0-9_-]{6,150}$/.test(id)) {fail('Code invalide.');return;}
+  const resumeKey = 'tqrx-recv:' + id;
+  let record = readRecord(resumeKey);
+  if (!record || Date.now() - record.at > 48*3600*1000 || !/^[a-zA-Z0-9-]{1,100}$/.test(record.client || '')) record = {client:secureId(),at:Date.now(),files:[]};
+  writeRecord(resumeKey,record);
+  const client = record.client;
+  try {sessionStorage.setItem('tqrx-active-receive',id);} catch (_) {}
   $('title').textContent = 'Réception'; $('sub').textContent = 'Connexion à l\'autre appareil…';
   setChip('En attente…', 0); document.querySelectorAll('.fs').forEach(e => e.textContent = '');
   show('prog'); keepAwake(); resetProgress();
@@ -558,6 +569,7 @@ function receive(id) {
   let finished = false, manifest = null, completedBytes = 0;
   let everConnected = false, lastIssue = '', missingCodeErrors = 0;
   const saved = [];
+  let memoryUsed=0;
   addEventListener('pagehide', () => { for (const x of saved) try { URL.revokeObjectURL(x.url); } catch (_) {} }, { once: true });
   let pendingEndShare = null;
   const completeIfReady = () => {
@@ -565,7 +577,7 @@ function receive(id) {
         saved.length !== manifest.files.length || !conn?.open) return false;
     try { conn.send(JSON.stringify({ type: 'end-ack', share: manifest.share })); }
     catch (_) { return false; }
-    done(); progress(manifest.total, manifest.total);
+    done(); removeRecord(resumeKey); progress(manifest.total, manifest.total);
     const n = saved.length, lab = n > 1 ? n + ' fichiers' : saved[0].name;
     addH('recv', lab, manifest.total, true);
     $('title').textContent = n > 1 ? 'Fichiers reçus' : 'Fichier reçu'; $('sub').textContent = '';
@@ -579,6 +591,8 @@ function receive(id) {
   };
   const transfer = new ReliableTransfer({
     preferDisk: true,
+    memoryBudget:()=>Math.max(0, (/Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent)?8:32)*1024*1024-memoryUsed),
+    validateIncoming: m => {const expected=manifest?.files[saved.length];return !!expected && m.id===manifest.share+'-'+client+'-'+saved.length && m.name===expected.name && m.size===expected.size;},
     onProgress: p => {
       if (p.direction === 'receive' && manifest) progress(completedBytes + p.transferred, manifest.total);
     },
@@ -590,6 +604,11 @@ function receive(id) {
       }
       const url = URL.createObjectURL(file);
       saved.push({ name: file.name, url });
+      // Only disk-backed completed files can survive a page reload.
+      if (transfer.receiver?.sink.kind === 'opfs') {
+        record.files[saved.length-1] = {name:file.name,size:file.size,mime:file.type,id:info.id};
+        record.at=Date.now(); writeRecord(resumeKey,record);
+      } else memoryUsed+=file.size;
       completedBytes += file.size;
       progress(completedBytes, manifest.total);
       const a = document.createElement('a'); a.href = url; a.download = file.name;
@@ -599,7 +618,7 @@ function receive(id) {
     onError: error => { $('pstat').textContent = 'Contrôle de réception : ' + error.message; }
   });
   const clearConnectTimer = () => { if (connectTimer) { clearTimeout(connectTimer); connectTimer = null; } };
-  const done = () => { finished = true; clearConnectTimer(); if (retryTimer) clearTimeout(retryTimer); };
+  const done = () => { finished = true; try {sessionStorage.removeItem('tqrx-active-receive');} catch (_) {} clearConnectTimer(); if (retryTimer) clearTimeout(retryTimer); };
   const stopWithError = message => {
     if (finished) return;
     done();
@@ -622,10 +641,12 @@ function receive(id) {
       (lastIssue ? ' ' + lastIssue : '') + ' Nouvelle tentative ' + (attempts + 1) + '/8. Gardez le code ouvert sur le PC qui envoie.';
     retryTimer = setTimeout(() => { retryTimer = null; connect(); }, waitMs);
   };
-  const handleControl = (d, c, gen) => {
-    if (gen !== generation || typeof d !== 'string') return;
+  let controlQueue = Promise.resolve();
+  const handleControl = async (d, c, gen) => {
+    if (gen !== generation || typeof d !== 'string' || d.length > 2*1024*1024 || d.startsWith('RT1|')) return;
     let m;
     try { m = JSON.parse(d); } catch (e) { return; }
+    if (!m || typeof m !== 'object') return;
     if (finished) {
       if (m.type === 'link') { try { c.send(JSON.stringify({ type: 'link-ack' })); } catch (_) {} }
       return;
@@ -633,21 +654,37 @@ function receive(id) {
     if (m.type === 'manifest') {
       const files = m.files;
       if (!Array.isArray(files) || !files.length || files.length > 5000 ||
-          files.some(f => typeof f.name !== 'string' || !f.name || !Number.isSafeInteger(f.size) || f.size < 0)) {
+          files.some(f => !f || typeof f.name !== 'string' || !f.name || f.name.length>255 || /[\\/\x00-\x1f\x7f]/.test(f.name) || !Number.isSafeInteger(f.size) || f.size < 0)) {
         stopWithError('Liste de fichiers reçue invalide.'); return;
       }
       const total = files.reduce((sum, f) => sum + f.size, 0);
-      if (!Number.isSafeInteger(total) || typeof m.share !== 'string' || m.share.length > 120) {
+      if (!Number.isSafeInteger(total) || typeof m.share !== 'string' || !/^[a-zA-Z0-9-]{1,80}$/.test(m.share)) {
         stopWithError('Données du transfert invalides.'); return;
       }
-      if (manifest && (manifest.share !== m.share || manifest.total !== total || manifest.files.length !== files.length)) {
+      if (manifest && (manifest.share !== m.share || manifest.total !== total || manifest.files.length !== files.length || manifest.files.some((f,i)=>f.name!==files[i].name||f.size!==files[i].size))) {
         stopWithError('Une autre session a tenté d’utiliser la connexion.'); return;
+      }
+      if (!manifest) {
+        if (record.share !== m.share) {record={client,share:m.share,files:[],at:Date.now()};writeRecord(resumeKey,record);}
+        else {
+          try {
+            const root=await navigator.storage.getDirectory();
+            for(let i=0;i<files.length;i++) {
+              const old=record.files?.[i], expected=files[i], expectedId=m.share+'-'+client+'-'+i;
+              if(!old || old.id!==expectedId || old.name!==expected.name || old.size!==expected.size)break;
+              const handle=await root.getFileHandle('rt1-'+expectedId+'.partial');
+              const file=await handle.getFile(); if(file.size!==expected.size)break;
+              saved.push({name:expected.name,url:URL.createObjectURL(file)});completedBytes+=file.size;
+            }
+          } catch(_) {}
+          record.files=(record.files||[]).slice(0,saved.length);writeRecord(resumeKey,record);
+        }
       }
       manifest = { files, total, share: m.share };
       setChip(files.length > 1 ? files.length + ' fichiers' : files[0].name, total);
       $('title').textContent = 'Réception en cours'; $('sub').textContent = '';
       $('pstat').textContent = 'Transfert sécurisé. Gardez cette page ouverte.';
-      c.send(JSON.stringify({ type: 'ready', share: m.share }));
+      c.send(JSON.stringify({ type: 'ready', share: m.share, nextIndex:saved.length }));
     } else if (m.type === 'end') {
       if (!manifest || m.share !== manifest.share) return;
       pendingEndShare = m.share;
@@ -655,7 +692,7 @@ function receive(id) {
     } else if (m.type === 'link') {
       if (typeof m.text !== 'string' || m.text.length > 10000) { stopWithError('Lien reçu invalide.'); return; }
       c.send(JSON.stringify({ type: 'link-ack' }));
-      done(); addH('recv', m.text, 0, true);
+      done(); removeRecord(resumeKey); addH('recv', m.text, 0, true);
       const u = safeUrl(m.text);
       $('openLnk').hidden = !u; if (u) $('openLnk').href = u;
       $('copyRecv').hidden = false; $('copyRecv').onclick = e => copyTxt(e.currentTarget, m.text);
@@ -688,7 +725,7 @@ function receive(id) {
     }
     $('sub').textContent = 'Tentative de connexion ' + attempts + '/8…';
     let c;
-    try { c = conn = peer.connect(id, { reliable: true, serialization: 'raw' }); }
+    try { c = conn = peer.connect(id, { reliable: true, serialization: 'raw', metadata:{client,version:2} }); }
     catch (e) { retry('Impossible de lancer WebRTC : ' + e.message); return; }
     connectTimer = setTimeout(async () => {
       if (gen !== generation || finished) return;
@@ -699,19 +736,20 @@ function receive(id) {
       if (conn === c) conn = null;
       try { c.close(); } catch (_) {}
       retry(reason);
-    }, 16000);
+    }, 25000);
     c.on('open', () => {
       if (gen !== generation || finished) return;
       clearConnectTimer();
       try { transfer.attachChannel(c.dataChannel, c.peerConnection); }
       catch (e) { try { c.close(); } catch (_) {} retry(e.message); return; }
+      attempts = 0; missingCodeErrors = 0;
       everConnected = true;
       lastIssue = '';
       $('title').textContent = 'Connexion établie';
       $('sub').textContent = 'Connecté. En attente des données…';
       $('pstat').textContent = 'Les deux PC communiquent. Démarrage du transfert…';
     });
-    c.on('data', d => handleControl(d, c, gen));
+    c.on('data', d => {if(typeof d!=='string'||d.startsWith('RT1|'))return;controlQueue=controlQueue.then(()=>handleControl(d,c,gen)).catch(e=>{stopWithError(e.message);try{c.close();}catch(_){}});});
     c.on('close', () => { if (gen === generation && !finished) {
       const reason = diagnose(c); captureDiagnosis(reason, c).finally(() => retry(reason));
     } });
@@ -743,6 +781,7 @@ function receive(id) {
   });
   // Le pair existe deja et son evenement 'open' est passe : demarrer tout de suite.
   // Le parcours QR (pair cree ici) continue d'attendre son propre evenement 'open'.
+  addEventListener('online',()=>{if(!finished && !conn?.open){attempts=0;retry('Réseau de nouveau disponible.');}});
   if (peer.open) connect();
 }
 
@@ -828,7 +867,8 @@ async function makeZip(entries, onp) {
   const total = entries.reduce((a, x) => a + x.file.size, 0) || 1; let done = 0, off = 0;
   const d = new Date(), dd = ((d.getFullYear() - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate(), tt = (d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1);
   for (const { file: f, path } of entries) {
-    let pth = path.replace(/^\/+/, ''), k = 1;
+    let pth = path.replace(/\\/g,'/').split('/').filter(x=>x && x!=='.' && x!=='..').join('/'), k = 1;
+    if (!pth || f.size > 0xffffffff || off + f.size + 65565 > 0xffffffff) throw Error('Limite ZIP classique dépassée.');
     while (seen.has(pth)) pth = path.replace(/(\.[^./]*)?$/, ' (' + (k++) + ')$1');
     seen.add(pth);
     const nm = enc.encode(pth);
@@ -902,7 +942,7 @@ function wireDrop(el, cb) {
   el.addEventListener('drop', e => { fromDrop(e.dataTransfer).then(([en, r]) => cb(en, r)); });
 }
 
-const targetId = location.hash.slice(1);
+const targetId = location.hash.slice(1) || (()=>{try{return sessionStorage.getItem('tqrx-active-receive')||'';}catch(_){return '';}})();
 if (targetId) receive(targetId);
 
 /* ============ ÉMETTEUR : accusés de réception et reprise ============ */
@@ -933,21 +973,14 @@ else {
   const label = it => it.length > 1 ? it.length + ' fichiers' : it[0].file.name;
   const total = it => it.reduce((a, x) => a + x.file.size, 0);
   const uniqueShare = () => crypto.randomUUID ? crypto.randomUUID() : [...crypto.getRandomValues(new Uint8Array(16))].map(x => x.toString(16).padStart(2, '0')).join('');
+  const closeSession = s => {if(!s)return;s.finished=true;clearTimeout(s.expiry);for(const r of s.recipients.values()){try{r.conn?.close();}catch(_){}}};
   const makeSession = () => {
+    closeSession(session);
     if (!items && linkText === null) return null;
-    const s = {
-      id: uniqueShare(), items, link: linkText, nextIndex: 0, completedBytes: 0,
-      total: items ? total(items) : 0, activeConn: null, activeGen: 0,
-      finished: false, endTimer: null, idleTimer: null, lastError: null
-    };
-    s.transfer = new ReliableTransfer({
-      onProgress: p => {
-        if (p.direction === 'send' && s.items) progress(s.completedBytes + p.transferred, s.total);
-      },
-      onError: e => { s.lastError = e.message; }
-    });
-    session = s;
-    return s;
+    const s = {id:uniqueShare(),items,link:linkText,total:items?total(items):0,recipients:new Map(),finished:false,activeConn:null,created:Date.now()};
+    const expire=()=>{if(s.finished)return;if([...s.recipients.values()].some(r=>r.running)||Date.now()-s.lastActivity<SHARE_TTL){s.expiry=setTimeout(expire,SHARE_TTL);return;}s.expired=true;updateRecipients(s);closeSession(s);};
+    s.lastActivity=Date.now();s.expiry=setTimeout(expire,SHARE_TTL);
+    session=s;return s;
   };
   const setItems = async (entries, root) => {
     const it = await prepare(entries, root); if (!it) return false;
@@ -960,7 +993,7 @@ else {
   $('dirBtn').onclick = () => $('dir').click();
   $('dir').onchange = e => { pick(...fromInput(e.target.files)); e.target.value = ''; };
   wireDrop($('drop'), pick);
-  $('change').onclick = () => { items = null; session = null; goHome(); };
+  $('change').onclick = () => { closeSession(session); items = null; session = null; goHome(); };
   $('again').onclick = () => location.href = location.pathname;
 
   function showQR() {
@@ -969,94 +1002,80 @@ else {
     $('sub').textContent = 'Ouvrez l\'appareil photo de l\'autre téléphone.';
     show('qr'); keepAwake();
   }
-  const endSession = (s, success) => {
-    if (s.finished) return;
-    s.finished = true;
-    if (s.idleTimer) clearTimeout(s.idleTimer);
-    if (s.endTimer) clearTimeout(s.endTimer);
-    if (s.items) addH('sent', label(s.items), s.total, success);
-    else if (s.link !== null && success) addH('sent', s.link, 0, true);
-    if (!success) { fail('Transfert interrompu : le destinataire ne répond plus.' + NET_TIP); return; }
-    if (s.items) {
-      progress(s.total, s.total);
-      $('title').textContent = s.items.length > 1 ? 'Fichiers envoyés' : 'Fichier envoyé';
-      $('dmsg').textContent = label(s.items) + ' (' + fmt(s.total) + ')';
-    } else {
-      $('title').textContent = 'Lien envoyé'; $('dmsg').textContent = s.link;
+  const allocateBandwidth = s => {
+    const engines=[...s.recipients.values()].filter(r=>r.running&&r.transfer).map(r=>r.transfer);
+    const mobile=/Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
+    for(const engine of engines){engine.windowBytes=Math.max(524288,Math.floor((mobile?2:8)*1024*1024/engines.length));engine.maxBufferedBytes=Math.max(262144,Math.floor((mobile?1:4)*1024*1024/engines.length));if(engine.channel)engine.channel.bufferedAmountLowThreshold=Math.min(engine.maxBufferedBytes/2,524288);}
+  };
+  const updateRecipients = s => {
+    if(s!==session || s.finished)return;
+    const all=[...s.recipients.values()], running=all.filter(r=>r.running), complete=all.filter(r=>r.complete);
+    const waiting=all.filter(r=>!r.complete&&!r.running&&!s.expired);
+    if(s.expired && !complete.length && !running.length){fail('Code expiré. Sélectionnez les fichiers pour un nouveau partage.');return;}
+    const code=oneTimeCode.slice(0,3)+' '+oneTimeCode.slice(3);
+    if(running.length || waiting.length) {
+      $('title').textContent=running.length?'Envoi en cours':'En attente de reconnexion';
+      $('sub').textContent='Code : '+code;
+      $('pstat').textContent=complete.length+' terminé(s) · '+running.length+' en cours · '+waiting.length+' en attente'+(!running.length&&waiting[0]?.lastError?' — '+waiting[0].lastError:'');
+      if(s.items){setChip(label(s.items),s.total);progress(all.reduce((sum,r)=>sum+(r.complete?s.total:r.bytes),0),s.total*all.length);}
+      show('prog');
+    } else if(complete.length){
+      $('title').textContent=s.items?'Envoi terminé':'Lien envoyé';
+      $('sub').textContent=s.expired?'Code expiré.':'Code : '+code+' — partage toujours disponible';
+      $('dmsg').textContent=(s.items?label(s.items):s.link)+' · '+complete.length+' destinataire(s)';
+      $('dlist').hidden=true;show('done');
     }
-    $('sub').textContent = ''; $('dlist').hidden = true; show('done');
   };
-  const armWaiting = s => {
-    if (s.finished || s.idleTimer) return;
-    $('title').textContent = 'En attente de reconnexion';
-    $('pstat').textContent = 'Connexion interrompue. L\'autre appareil essaie automatiquement de se reconnecter.';
-    s.idleTimer = setTimeout(() => { s.idleTimer = null; if (!s.finished && (!s.activeConn || !s.activeConn.open)) endSession(s, false); }, 95000);
-  };
+  let incomingAttempts=[];
   const serve = pr => pr.on('connection', c => {
-    const s = session;
-    if (!s || s.finished) { c.close(); return; }
-    if (s.activeConn && s.activeConn.open) { c.close(); return; }
-    const gen = ++s.activeGen;
-    s.activeConn = c;
-    if (s.idleTimer) { clearTimeout(s.idleTimer); s.idleTimer = null; }
-    let readyResolve, doneResolve;
-    const ready = new Promise(resolve => readyResolve = resolve);
-    const receivedEnd = new Promise(resolve => doneResolve = resolve);
-    c.on('data', d => {
-      if (typeof d !== 'string') return;
-      let m; try { m = JSON.parse(d); } catch (_) { return; }
-      if (m.type === 'ready' && m.share === s.id) readyResolve();
-      if (m.type === 'end-ack' && m.share === s.id) doneResolve();
-      if (m.type === 'link-ack') doneResolve();
+    const now=Date.now();incomingAttempts=incomingAttempts.filter(t=>now-t<10000);
+    if(incomingAttempts.length>=30){c.close();return;}incomingAttempts.push(now);
+    const s=session, client=c.metadata?.client;
+    if(!s || s.finished || s.expired || c.metadata?.version!==2 || typeof client!=='string' || !/^[a-zA-Z0-9-]{1,100}$/.test(client)){c.close();return;}
+    let r=s.recipients.get(client);
+    if(r?.running || r?.conn || (r?.complete && !s.items) || (!r && s.recipients.size>=MAX_RECIPIENTS)){c.close();return;}
+    if(!r){r={conn:null,running:false,complete:false,bytes:0};s.recipients.set(client,r);}
+    r.conn=c;s.activeConn=c;s.lastActivity=Date.now();
+    let readyResolve,doneResolve,closedReject;
+    const ready=new Promise(resolve=>readyResolve=resolve),receivedEnd=new Promise(resolve=>doneResolve=resolve);
+    const closed=new Promise((_,reject)=>closedReject=reject);closed.catch(()=>{});
+    const wait=(promise,ms,message)=>{let timer;return Promise.race([promise,closed,new Promise((_,reject)=>timer=setTimeout(()=>reject(Error(message)),ms))]).finally(()=>clearTimeout(timer));};
+    const opened=setTimeout(()=>{if(!c.open)try{c.close();}catch(_){}},30000);
+    c.on('data',d=>{
+      if(typeof d!=='string'||d.length>16384||d.startsWith('RT1|'))return;
+      let m;try{m=JSON.parse(d);}catch(_){return;}
+      if(!m||typeof m!=='object')return;
+      if(m.type==='ready'&&m.share===s.id&&Number.isSafeInteger(m.nextIndex)&&m.nextIndex>=0&&m.nextIndex<=(s.items?.length||0))readyResolve(m.nextIndex);
+      if(m.type==='end-ack'&&m.share===s.id)doneResolve();
+      if(m.type==='link-ack'&&s.link!==null)doneResolve();
     });
-    c.on('close', () => { if (gen === s.activeGen && !s.finished) armWaiting(s); });
-    c.on('error', () => { if (gen === s.activeGen && !s.finished) armWaiting(s); });
-    c.on('open', async () => {
-      if (s.finished || gen !== s.activeGen) return;
-      try {
-        if (s.link !== null) {
-          const linkPayload = JSON.stringify({ type: 'link', text: s.link });
-          c.send(linkPayload);
-          const linkRetry = setInterval(() => { if (c.open && !s.finished) { try { c.send(linkPayload); } catch (_) {} } }, 1300);
-          try { await Promise.race([receivedEnd, sleep(20000).then(() => { throw Error('Aucune confirmation du lien.'); })]); }
-          finally { clearInterval(linkRetry); }
-          if (gen === s.activeGen) endSession(s, true);
-          return;
+    const disconnect=()=>{clearTimeout(opened);closedReject(Error('Connexion interrompue.'));if(r.conn===c){r.conn=null;r.running=false;r.transfer=null;s.lastActivity=Date.now();allocateBandwidth(s);updateRecipients(s);}};
+    c.on('close',disconnect);c.on('error',()=>{try{c.close();}catch(_){}disconnect();});
+    c.on('open',async()=>{
+      clearTimeout(opened);if(s.finished||r.conn!==c){try{c.close();}catch(_){}return;}
+      r.running=true;r.complete=false;updateRecipients(s);
+      let transfer;
+      try{
+        if(s.link!==null){c.send(JSON.stringify({type:'link',text:s.link}));await wait(receivedEnd,20000,'Aucune confirmation du lien.');}
+        else {
+          const hello=JSON.stringify({type:'manifest',share:s.id,files:s.items.map(x=>({name:x.file.name,size:x.file.size,mime:x.file.type}))});
+          transfer=new ReliableTransfer({windowBytes:1024*1024,maxBufferedBytes:512*1024,
+            validateIncoming:()=>false,onProgress:p=>{if(p.direction==='send'){r.bytes=r.base+p.transferred;updateRecipients(s);}},onError:()=>{}});
+          transfer.attachChannel(c.dataChannel,c.peerConnection);r.transfer=transfer;allocateBandwidth(s);
+          if(new TextEncoder().encode(hello).length > (c.peerConnection?.sctp?.maxMessageSize || 65536))throw Error('Liste de fichiers trop longue. Regroupez les fichiers ou envoyez-les en plusieurs fois.');
+          c.send(hello);const timer=setInterval(()=>{if(c.open)try{c.send(hello);}catch(_){}},1400);
+          let next;try{next=await wait(ready,30000,'Aucune réponse du destinataire.');}finally{clearInterval(timer);}
+          r.base=s.items.slice(0,next).reduce((sum,x)=>sum+x.file.size,0);r.bytes=r.base;
+          for(let i=next;i<s.items.length;i++){
+            if(s.finished||r.conn!==c)throw Error('Session terminée.');
+            const file=s.items[i].file;await transfer.sendFile(file,{id:s.id+'-'+client+'-'+i});r.base+=file.size;r.bytes=r.base;
+          }
+          c.send(JSON.stringify({type:'end',share:s.id}));await wait(receivedEnd,25000,'Confirmation finale non reçue.');
         }
-        s.transfer.attachChannel(c.dataChannel, c.peerConnection);
-        $('title').textContent = 'En attente du destinataire'; $('sub').textContent = '';
-        setChip(label(s.items), s.total); show('prog');
-        const hello = JSON.stringify({ type: 'manifest', share: s.id,
-          files: s.items.map(x => ({ name: x.file.name, size: x.file.size, mime: x.file.type, path: x.path })) });
-        c.send(hello);
-        // The far end may not have installed its receive handler yet on opening.
-        const helloRetry = setInterval(() => { if (c.open && !s.finished) { try { c.send(hello); } catch (_) {} } }, 1400);
-        try { await Promise.race([ready, sleep(30000).then(() => { throw Error('Aucune réponse du destinataire.'); })]); }
-        finally { clearInterval(helloRetry); }
-        if (s.finished || gen !== s.activeGen) return;
-        $('title').textContent = 'Envoi en cours'; resetProgress();
-        $('pstat').textContent = 'Envoi fiable : contrôle des blocs et confirmation à la réception.';
-        for (let i = s.nextIndex; i < s.items.length; i++) {
-          if (s.finished || gen !== s.activeGen) return;
-          const file = s.items[i].file;
-          if (s.items.length > 1) setChip(file.name, file.size, 'fichier ' + (i + 1) + '/' + s.items.length);
-          await s.transfer.sendFile(file, { id: s.id + '-' + i });
-          s.completedBytes += file.size;
-          s.nextIndex = i + 1;
-          progress(s.completedBytes, s.total);
-        }
-        if (s.finished || gen !== s.activeGen) return;
-        c.send(JSON.stringify({ type: 'end', share: s.id }));
-        await Promise.race([receivedEnd, sleep(25000).then(() => { throw Error('Confirmation finale non reçue.'); })]);
-        if (gen === s.activeGen) endSession(s, true);
-      } catch (e) {
-        if (gen === s.activeGen && !s.finished) {
-          s.lastError = e.message;
-          $('pstat').textContent = 'Connexion interrompue, reprise en attente : ' + e.message;
-          try { c.close(); } catch (_) {}
-          armWaiting(s);
-        }
-      }
+        r.complete=true;r.bytes=s.total;
+        addH('sent',s.items?label(s.items):s.link,s.total,true);
+      }catch(e){if(r.conn===c)r.lastError=e.message;}
+      finally{transfer?.detachChannel();if(r.conn===c){r.running=false;r.conn=null;r.transfer=null;s.lastActivity=Date.now();allocateBandwidth(s);try{c.close();}catch(_){}updateRecipients(s);}if(s.expired&&![...s.recipients.values()].some(x=>x.running))closeSession(s);}
     });
   });
   serve(peer);
@@ -1085,7 +1104,7 @@ else {
   }
   const cancelCode = () => {
     pendingPcReady = null;
-    linkText = null; session = null; goHome();
+    closeSession(session); linkText = null; session = null; goHome();
   };
   $('pcfile').onchange = e => { startPcShare(...fromInput(e.target.files)); e.target.value = ''; };
   $('pcdirBtn').onclick = () => $('pcdir').click();
@@ -1102,7 +1121,7 @@ else {
   $('codeGo').onclick = go('codeIn', 'codeErr'); $('codeIn').onkeydown = e => { if (e.key === 'Enter') $('codeGo').click(); };
   $('lcodeGo').onclick = go('lcodeIn', 'lcodeErr'); $('lcodeIn').onkeydown = e => { if (e.key === 'Enter') $('lcodeGo').click(); };
   $('linkGo').onclick = () => {
-    const t = $('linkIn').value.trim(); if (!t) { $('linkErr').textContent = 'Collez d\'abord un lien.'; return; }
+    const t = $('linkIn').value.trim(); if (t.length>10000){$('linkErr').textContent='Lien trop long.';return;} if (!t) { $('linkErr').textContent = 'Collez d\'abord un lien.'; return; }
     $('linkErr').textContent = ''; startLinkShare(t);
   };
   $('lcopyCode').onclick = e => copyTxt(e.currentTarget, pcCode);

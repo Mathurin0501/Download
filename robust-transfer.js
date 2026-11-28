@@ -5,9 +5,9 @@
  * Protocol: RT1| JSON control frames + binary framed chunks.
  */
 
-const PREFIX = 'RT1|';
-const MAGIC = 0x52543144; // "RT1D"
-const HEADER_SIZE = 12;
+const PREFIX = 'RT1|'; // Control framing retained; binary protocol v2 (SHA-256).
+const MAGIC = 0x52543244; // RT2D
+const HEADER_SIZE = 44;
 const DEFAULT_CHUNK_SIZE = 16 * 1024 - HEADER_SIZE;
 const ACK_INTERVAL = 256 * 1024;
 // Back-pressure adaptive: PCs can keep a wider window, phones stay conservative.
@@ -15,12 +15,15 @@ const MOBILE_DEVICE = typeof navigator !== 'undefined' &&
   /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || '');
 const DEFAULT_WINDOW_SIZE = MOBILE_DEVICE ? 2 * 1024 * 1024 : 8 * 1024 * 1024;
 const DEFAULT_MAX_BUFFERED = MOBILE_DEVICE ? 1024 * 1024 : 4 * 1024 * 1024;
-const OPFS_WRITE_BATCH = 512 * 1024;
 const MEMORY_SINK_LIMIT = MOBILE_DEVICE ? 8 * 1024 * 1024 : 32 * 1024 * 1024;
 let opfsCleanupStarted = false;
 async function cleanupStaleOPFS(dir) {
   if (opfsCleanupStarted) return;
   opfsCleanupStarted = true;
+  try {
+    const expiry=Date.now()-48*3600*1000;
+    for(let i=localStorage.length-1;i>=0;i--){const key=localStorage.key(i);if(!key?.startsWith('tqrx-partial:')&&!key?.startsWith('tqrx-recv:'))continue;try{const record=JSON.parse(localStorage.getItem(key));if(!record?.at||record.at<expiry)localStorage.removeItem(key);}catch(_){localStorage.removeItem(key);}}
+  }catch(_){}
   // The same origin may have another active tab. Only remove files older than 48h.
   try {
     const expiry = Date.now() - 48 * 3600 * 1000;
@@ -33,7 +36,6 @@ async function cleanupStaleOPFS(dir) {
     }
   } catch (_) {}
 }
-const WAIT_INTERVAL_MS = 20;
 const TRANSFER_TIMEOUT_MS = 60000;
 
 const CRC_TABLE = (() => {
@@ -52,7 +54,6 @@ function crc32(bytes) {
   }
   return (crc ^ 0xffffffff) >>> 0;
 }
-const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 function safeName(name) {
   return String(name || 'fichier').replace(/[\\/\x00-\x1f\x7f]/g, '_').slice(0, 255) || 'fichier';
 }
@@ -71,68 +72,84 @@ function chooseChunkSize(pc) {
   }
   return DEFAULT_CHUNK_SIZE; // conservative cross-browser fallback
 }
-function frameFor(index, bytes) {
+async function frameFor(index, bytes) {
   const out = new Uint8Array(HEADER_SIZE + bytes.byteLength);
   const header = new DataView(out.buffer);
   header.setUint32(0, MAGIC);
   header.setUint32(4, index);
   header.setUint32(8, crc32(bytes));
+  out.set(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), 12);
   out.set(bytes, HEADER_SIZE);
   return out;
 }
-function decodeFrame(buffer) {
+async function decodeFrame(buffer) {
   if (!(buffer instanceof ArrayBuffer) || buffer.byteLength < HEADER_SIZE) {
     throw new Error('Bloc de données invalide.');
   }
   const view = new DataView(buffer);
   if (view.getUint32(0) !== MAGIC) throw new Error('Protocole binaire non reconnu.');
+  if (buffer.byteLength > 65536) throw new Error('Bloc trop volumineux.');
   const bytes = new Uint8Array(buffer, HEADER_SIZE);
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+  if (!digest.every((v,i) => v === view.getUint8(12+i))) throw new Error('SHA-256 du bloc invalide.');
   if (crc32(bytes) !== view.getUint32(8)) throw new Error('Intégrité du bloc non vérifiée.');
   return { index: view.getUint32(4), bytes };
 }
 function storageAvailable() {
   return Boolean(globalThis.navigator?.storage?.getDirectory);
 }
-async function createSink(id, preferDisk, size) {
-  if (preferDisk && size > MEMORY_SINK_LIMIT && storageAvailable()) {
+async function createSink(id, preferDisk, size, chunkSize, memoryBudget = MEMORY_SINK_LIMIT) {
+  const memoryLimit = Math.min(MEMORY_SINK_LIMIT, Math.max(0, memoryBudget));
+  const fileName = `rt1-${id}.partial`;
+  const key = `tqrx-partial:${id}`;
+  if (preferDisk && storageAvailable() && typeof Worker !== 'undefined') {
+    let worker;
     try {
       const dir = await navigator.storage.getDirectory();
       void cleanupStaleOPFS(dir);
-      const fileName = `rt1-${id.replace(/[^a-zA-Z0-9-]/g, '')}.partial`;
-      const handle = await dir.getFileHandle(fileName, { create: true });
-      const writer = await handle.createWritable({ keepExistingData: false });
-      let pending = [], pendingLength = 0;
-      const flush = async () => {
-        if (!pendingLength) return;
-        const blob = new Blob(pending);
-        pending = []; pendingLength = 0;
-        await writer.write(blob);
+      let record = null;
+      try { record = JSON.parse(localStorage.getItem(key)); } catch (_) {}
+      let offset = record?.size === size && record?.chunkSize === chunkSize &&
+        Number.isSafeInteger(record.offset) && record.offset >= 0 && record.offset <= size &&
+        (record.offset === size || record.offset % chunkSize === 0) ? record.offset : 0;
+      const estimate = await navigator.storage.estimate?.();
+      if (estimate?.quota != null && estimate?.usage != null && size - offset > estimate.quota - estimate.usage) {
+        throw new Error('Espace de stockage insuffisant.');
+      }
+      worker = new Worker(new URL('./storage-worker.js', import.meta.url), {type:'module'});
+      let serial = 0;
+      const pending = new Map();
+      worker.onmessage = ({data}) => {
+        const task = pending.get(data.seq); if (!task) return;
+        pending.delete(data.seq); clearTimeout(task.timer);
+        if (data.error) task.reject(new Error(data.error)); else task.resolve(data.value);
+      };
+      worker.onerror = () => { for (const task of pending.values()) { clearTimeout(task.timer); task.reject(new Error('Stockage local indisponible.')); } pending.clear(); };
+      const call = (op, args = {}, transfers = []) => new Promise((resolve,reject) => {
+        const seq = ++serial;
+        const timer = setTimeout(() => { pending.delete(seq); reject(new Error('Délai de stockage dépassé.')); }, 30000);
+        pending.set(seq, {resolve,reject,timer});
+        worker.postMessage({seq,op,...args}, transfers);
+      });
+      offset = await call('open',{fileName,offset});
+      const handle = await dir.getFileHandle(fileName);
+      const checkpoint = async position => {
+        await call('flush');
+        try { localStorage.setItem(key, JSON.stringify({size,chunkSize,offset:position,at:Date.now()})); } catch (_) {}
       };
       return {
-        kind: 'opfs', dir, handle, writer, fileName,
-        async append(bytes) {
-          pending.push(bytes.slice()); pendingLength += bytes.byteLength;
-          if (pendingLength >= OPFS_WRITE_BATCH) await flush();
-        },
-        async finish(name, type) {
-          await flush();
-          await writer.close();
-          const file = await handle.getFile();
-          return new File([file], name, { type });
-        },
-        async abort() { pending.length = 0; pendingLength = 0; try { await writer.abort(); } catch {} try { await dir.removeEntry(fileName); } catch {} }
+        kind:'opfs', offset, fileName,
+        async append(bytes) { const copy = bytes.slice(); await call('write',{buffer:copy.buffer},[copy.buffer]); },
+        checkpoint,
+        async finish(name,type) { await checkpoint(size); await call('close'); worker.terminate(); const file = await handle.getFile(); return new File([file],name,{type}); },
+        async abort() { try { await call('close'); } catch (_) {} worker.terminate(); try { await dir.removeEntry(fileName); } catch (_) {} try { localStorage.removeItem(key); } catch (_) {} }
       };
-    } catch (e) {
-      // Private browsing / unsupported quota may make OPFS inaccessible.
-    }
+    } catch (e) { worker?.terminate(); if (size > memoryLimit) throw new Error('Stockage disque indisponible : ' + e.message); }
   }
+  if (size > memoryLimit) throw new Error('Fichier trop volumineux pour la mémoire disponible. Utilisez un navigateur compatible OPFS.');
   const parts = [];
-  return {
-    kind: 'memory',
-    async append(bytes) { parts.push(bytes.slice()); },
-    async finish(name, type) { return new File(parts, name, { type }); },
-    async abort() { parts.length = 0; }
-  };
+  return { kind:'memory', offset:0, async append(bytes){parts.push(bytes.slice());}, async checkpoint(){},
+    async finish(name,type){return new File(parts,name,{type});}, async abort(){parts.length=0;} };
 }
 
 /**
@@ -154,7 +171,7 @@ export class ReliableTransfer {
     this.configuredChunkSize = options.chunkSize || null;
     this.windowBytes = options.windowBytes || DEFAULT_WINDOW_SIZE;
     this.maxBufferedBytes = options.maxBufferedBytes || DEFAULT_MAX_BUFFERED;
-    if (!Number.isSafeInteger(this.windowBytes) || this.windowBytes < 262144 ||
+    if (!Number.isSafeInteger(this.windowBytes) || this.windowBytes < 524288 ||
         !Number.isSafeInteger(this.maxBufferedBytes) || this.maxBufferedBytes < 65536) {
       throw new RangeError('Limites de transfert invalides.');
     }
@@ -163,6 +180,9 @@ export class ReliableTransfer {
     this.receiver = null;
     this.lastOutgoing = null;
     this.receiveQueue = Promise.resolve();
+    this.queuedBytes = 0;
+    this.validateIncoming = options.validateIncoming || (() => true);
+    this.memoryBudget = options.memoryBudget || (() => MEMORY_SINK_LIMIT);
     this.handlers = null;
     this.progressHistory = new Map();
   }
@@ -186,23 +206,27 @@ export class ReliableTransfer {
     this.detachChannel();
     this.channel = channel;
     this.channel.binaryType = 'arraybuffer';
-    this.chunkSize = Math.min(this.configuredChunkSize || chooseChunkSize(peerConnection), 64 * 1024 - HEADER_SIZE);
+    this.chunkSize = Math.min(this.configuredChunkSize || DEFAULT_CHUNK_SIZE, 64 * 1024 - HEADER_SIZE);
     if (this.chunkSize < 1024) throw new Error('Taille des blocs invalide.');
     channel.bufferedAmountLowThreshold = Math.min(this.maxBufferedBytes / 2, 512 * 1024);
     const onMessage = e => {
       // Serialize asynchronous disk writes to preserve chunk order and ACK semantics.
+      if (typeof e.data === 'string' && !e.data.startsWith(PREFIX)) return;
+      const length = typeof e.data === 'string' ? e.data.length * 2 : (e.data.byteLength ?? e.data.size ?? 0);
+      if (length > 65536 || this.queuedBytes + length > 16 * 1024 * 1024) { channel.close(); return; }
+      this.queuedBytes += length;
       this.receiveQueue = this.receiveQueue.then(() => this.handleMessage(e.data)).catch(async err => {
         this.reportError(err);
         this.sendControlSafe({ type: 'error', id: this.receiver?.id, message: err.message });
         // A corrupt/incomplete chunk cannot be resumed from a trusted offset.
         // Discard only the current partial file, then let the app reconnect.
         const current = this.receiver;
-        if (current && !current.finished) {
+        if (current && !current.finished && this.channel === channel) {
           this.receiver = null;
           try { await current.sink.abort(); } catch (_) {}
         }
         try { if (channel.readyState === 'open') channel.close(); } catch (_) {}
-      });
+      }).finally(() => { this.queuedBytes -= length; });
     };
     const onClose = () => this.onStatus({ state: 'disconnected', message: 'Connexion interrompue. Le transfert peut être retenté.' });
     const onError = () => this.onStatus({ state: 'error', message: 'Erreur du canal WebRTC.' });
@@ -244,7 +268,14 @@ export class ReliableTransfer {
       if (!this.isConnected || (this.sender && this.sender.channel !== this.channel)) throw new Error('Connexion perdue. Reconnectez les appareils et réessayez.');
       if (this.sender?.failed) throw this.sender.failed;
       if (Date.now() - started > timeout) throw new Error('Délai dépassé : la connexion ou le récepteur ne répond plus.');
-      await delay(WAIT_INTERVAL_MS);
+      const channel = this.channel;
+      await new Promise(resolve => {
+        const wake = () => { clearTimeout(timer); channel?.removeEventListener('bufferedamountlow',wake); channel?.removeEventListener('message',wake); channel?.removeEventListener('close',wake); resolve(); };
+        const timer = setTimeout(wake, 100);
+        channel?.addEventListener('bufferedamountlow',wake,{once:true});
+        channel?.addEventListener('message',wake,{once:true});
+        channel?.addEventListener('close',wake,{once:true});
+      });
     }
   }
 
@@ -267,15 +298,17 @@ export class ReliableTransfer {
       const startChunk = acceptedOffset === file.size ? Math.ceil(file.size / chunkSize) : acceptedOffset / chunkSize;
       if (!Number.isInteger(startChunk)) throw new Error('Position de reprise invalide.');
       const totalChunks = Math.ceil(file.size / chunkSize);
+      if(totalChunks > 0x100000000) throw Error('Fichier trop volumineux pour le protocole.');
       this.emitProgress({ direction: 'send', name: meta.name, transferred: acceptedOffset, total: file.size, percent: file.size ? acceptedOffset / file.size * 100 : 100 });
       for (let i = startChunk; i < totalChunks; i++) {
         const offset = i * chunkSize;
         // Limit both native WebRTC buffering and unacknowledged receiver work.
         await this.waitFor(() => this.channel.bufferedAmount <= this.maxBufferedBytes &&
-          offset - state.acknowledged <= this.windowBytes);
+          offset + Math.min(chunkSize, file.size-offset) - state.acknowledged <= this.windowBytes);
         const bytes = new Uint8Array(await file.slice(offset, Math.min(offset + chunkSize, file.size)).arrayBuffer());
-        const packet = frameFor(i, bytes);
+        const packet = await frameFor(i, bytes);
         if (!this.isConnected || this.channel !== state.channel) throw new Error('Connexion interrompue pendant l’envoi.');
+        state.sentThrough = Math.min(file.size, offset + bytes.length);
         this.channel.send(packet);
       }
       await this.waitFor(() => state.acknowledged >= file.size);
@@ -310,7 +343,7 @@ export class ReliableTransfer {
     }
     if (raw instanceof Blob) raw = await raw.arrayBuffer();
     if (raw instanceof ArrayBuffer) {
-      const parsed = decodeFrame(raw);
+      const parsed = await decodeFrame(raw);
       await this.handleChunk(parsed);
     }
   }
@@ -319,45 +352,47 @@ export class ReliableTransfer {
     switch (msg.type) {
       case 'file': {
         const { id, name, size, mime, chunkSize } = msg;
-        if (typeof id !== 'string' || id.length > 150 || !id ||
-            typeof name !== 'string' || name.length > 1024 ||
+        if (typeof id !== 'string' || !/^[a-zA-Z0-9-]{1,150}$/.test(id) ||
+            typeof name !== 'string' || name.length > 255 || !name || name !== safeName(name) ||
             !Number.isSafeInteger(size) || size < 0 ||
-            !Number.isInteger(chunkSize) || chunkSize < 1024 || chunkSize > 65536) {
+            !Number.isInteger(chunkSize) || chunkSize < 1024 || chunkSize > 65536 - HEADER_SIZE || Math.ceil(size/chunkSize)>0x100000000) {
           throw new Error('Métadonnées de fichier incorrectes.');
         }
         if (this.receiver && this.receiver.id !== id && !this.receiver.finished) {
           this.sendControlSafe({ type: 'error', id, message: 'Un fichier est déjà en cours de réception.' });
           return;
         }
+        if (!this.validateIncoming(msg) && this.receiver?.id !== id) throw new Error('Fichier non autorisé.');
         if (this.receiver?.id === id) {
-          if (this.receiver.size !== size || this.receiver.chunkSize !== chunkSize) throw new Error('Incompatibilité de reprise.');
+          if (this.receiver.size !== size || this.receiver.chunkSize !== chunkSize || this.receiver.name !== name) throw new Error('Incompatibilité de reprise.');
           if (this.receiver.failed) throw this.receiver.failed;
-          this.sendControl({ type: 'accept', id, offset: this.receiver.receivedBytes });
+          this.sendControlSafe({ type: 'accept', id, offset: this.receiver.receivedBytes });
           break;
         }
-        const sink = await createSink(id, this.preferDisk, size);
+        const sink = await createSink(id, this.preferDisk, size, chunkSize, this.memoryBudget());
         this.receiver = { id, name: safeName(name), size, mime: String(mime || ''), chunkSize,
-          sink, receivedBytes: 0, lastAck: 0, nextIndex: 0, finished: false, failed: null };
+          sink, receivedBytes: sink.offset, lastAck: sink.offset, nextIndex: Math.ceil(sink.offset / chunkSize), finished: false, failed: null };
         this.onStatus({ state: 'receiving', name: this.receiver.name, size });
-        this.sendControl({ type: 'accept', id, offset: 0 });
+        this.sendControlSafe({ type: 'accept', id, offset: sink.offset });
         break;
       }
       case 'accept': {
         const s = this.sender;
-        if (!s || s.id !== msg.id || !Number.isSafeInteger(msg.offset) ||
+        if (!s || s.accepted || s.id !== msg.id || !Number.isSafeInteger(msg.offset) ||
             msg.offset < 0 || msg.offset > s.meta.size) return;
         // Only complete blocks can be resumed (except completed file).
         if (msg.offset !== s.meta.size && msg.offset % s.meta.chunkSize !== 0) {
           s.failed = new Error('Reprise refusée : position non alignée.'); return;
         }
         s.acknowledged = msg.offset;
+        s.sentThrough = msg.offset;
         s.accepted = true;
         break;
       }
       case 'ack': {
         const s = this.sender;
         if (!s || s.id !== msg.id || !Number.isSafeInteger(msg.offset)) return;
-        if (msg.offset >= s.acknowledged && msg.offset <= s.meta.size) {
+        if (s.accepted && msg.offset >= s.acknowledged && msg.offset <= Math.min(s.meta.size, s.sentThrough ?? s.acknowledged)) {
           s.acknowledged = msg.offset;
           this.emitProgress({ direction: 'send', name: s.meta.name, transferred: s.acknowledged,
             total: s.meta.size, percent: s.meta.size ? s.acknowledged / s.meta.size * 100 : 100 });
@@ -367,22 +402,22 @@ export class ReliableTransfer {
       case 'end': {
         const r = this.receiver;
         if (!r || r.id !== msg.id) return;
-        if (r.finished) { this.sendControl({ type: 'complete', id: r.id }); return; }
+        if (r.finished) { this.sendControlSafe({ type: 'complete', id: r.id }); return; }
         if (r.receivedBytes !== r.size) {
-          this.sendControl({ type: 'error', id: r.id, message: `Fichier incomplet (${r.receivedBytes}/${r.size}).` });
+          this.sendControlSafe({ type: 'error', id: r.id, message: `Fichier incomplet (${r.receivedBytes}/${r.size}).` });
           return;
         }
         const file = await r.sink.finish(r.name, r.mime);
         try { await this.onFileReceived(file, { id: r.id, name: r.name, size: r.size, mime: r.mime }); }
         catch (e) { this.sendControlSafe({ type: 'error', id: r.id, message: 'Échec de sauvegarde sur le récepteur.' }); throw e; }
         r.finished = true;
-        this.sendControl({ type: 'complete', id: r.id });
+        this.sendControlSafe({ type: 'complete', id: r.id });
         this.onStatus({ state: 'received', name: r.name, size: r.size });
         break;
       }
       case 'complete': {
         const s = this.sender;
-        if (s && s.id === msg.id) s.finished = true;
+        if (s && s.id === msg.id && s.accepted && s.acknowledged === s.meta.size) s.finished = true;
         break;
       }
       case 'error': {
@@ -420,6 +455,7 @@ export class ReliableTransfer {
     this.emitProgress({ direction: 'receive', name: r.name, transferred: r.receivedBytes,
       total: r.size, percent: r.size ? 100 * r.receivedBytes / r.size : 100 });
     if (r.receivedBytes - r.lastAck >= ACK_INTERVAL || r.receivedBytes === r.size) {
+      await r.sink.checkpoint(r.receivedBytes);
       r.lastAck = r.receivedBytes;
       this.sendControlSafe({ type: 'ack', id: r.id, offset: r.receivedBytes });
     }

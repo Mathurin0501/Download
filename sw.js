@@ -1,9 +1,9 @@
 /* Transfert QR : mise a jour automatique pour le site et l'application installee.
    Conserve l'interface, les transferts et l'historique (localStorage) intacts. */
-const CACHE = 'transfert-qr-v8-20261122';
-const APP_ASSETS = ['./', './index.html', './robust-transfer.js', './manifest.webmanifest',
+const CACHE = 'transfert-qr-v9-20261128';
+const APP_ASSETS = ['./', './index.html', './robust-transfer.js', './storage-worker.js', './manifest.webmanifest',
   './icon-192.png', './icon-512.png', './apple-touch-icon.png'];
-const CHECK_ASSETS = ['./index.html', './robust-transfer.js'];
+const CHECK_ASSETS = ['./index.html', './robust-transfer.js', './storage-worker.js'];
 const appURL = path => new URL(path, self.registration.scope).href;
 
 self.addEventListener('install', event => {
