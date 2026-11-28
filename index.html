@@ -3,6 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob:; media-src 'self' blob: data:; connect-src 'self' https: wss:; worker-src 'self' blob:; manifest-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; upgrade-insecure-requests">
+<meta name="referrer" content="strict-origin-when-cross-origin">
+<meta http-equiv="Permissions-Policy" content="camera=(self), microphone=(), geolocation=(), payment=(), usb=()">
 <meta name="theme-color" content="#0e0b2b">
 <meta name="description" content="Transférez facilement des fichiers, photos, vidéos et documents entre téléphone, ordinateur et tablette. Partage direct par QR code, code temporaire ou lien, sans câble ni création de compte.">
 <meta name="robots" content="index, follow, max-image-preview:large">
@@ -209,6 +212,9 @@ footer{text-align:center;color:var(--mute);font-size:12px;margin-top:18px;opacit
     <div class="chip"><span class="ic">FILEICON</span><div><b class="fn"></b><small class="fs"></small></div></div>
     <p class="msg" style="margin-bottom:8px">Donnez ce code à l'autre PC</p>
     <div class="codebox" id="codeBig">––– –––</div>
+    <p class="msg" style="margin:12px 0 8px">ou faites scanner ce QR code</p>
+    <div class="qrwrap"><div class="qrtile" id="pcqr"></div></div>
+    <p class="hint" style="margin-top:-6px">Le même QR code peut être scanné par plusieurs appareils.</p>
     <div class="row"><button class="btn" id="copyCode">Copier le code</button><button class="btn ghost" id="copyLink">Copier le lien</button></div>
     <div class="wait" style="margin-top:16px"><span class="pulse"></span>En attente de l'autre PC…</div>
     <button class="btn ghost" id="codeCancel">Annuler</button>
@@ -494,9 +500,9 @@ renderH();
 
 // Connexions P2P directes uniquement : aucun serveur TURN.
 const PEER_CFG = { debug: 1, config: { iceServers: [
-  {urls: ['stun:stun.l.google.com:19302','stun:stun1.l.google.com:19302','stun:stun2.l.google.com:19302']},
-  {urls: 'stun:stun.cloudflare.com:3478'}
-], iceTransportPolicy:'all', iceCandidatePoolSize: 2 } };
+  {urls: ['stun:stun.l.google.com:19302','stun:stun1.l.google.com:19302','stun:stun2.l.google.com:19302','stun:stun3.l.google.com:19302','stun:stun4.l.google.com:19302']},
+  {urls: ['stun:stun.cloudflare.com:3478','stun:global.stun.twilio.com:3478']}
+], iceTransportPolicy:'all', iceCandidatePoolSize: 6 } };
 const MAX_RECIPIENTS = 5;
 const SHARE_TTL = 30 * 60 * 1000;
 const readRecord = key => {try{return JSON.parse(localStorage.getItem(key));}catch(_){return null;}};
@@ -504,7 +510,7 @@ const writeRecord = (key,value) => {try{localStorage.setItem(key,JSON.stringify(
 const removeRecord = key => {try{localStorage.removeItem(key);}catch(_){}};
 const secureId = () => crypto.randomUUID ? crypto.randomUUID() : [...crypto.getRandomValues(new Uint8Array(16))].map(x=>x.toString(16).padStart(2,'0')).join('');
 const NET_TIP = ' Sur Opera, vérifiez que le VPN est désactivé. Essayez Edge/Chrome sur les deux PC. Un réseau invité ou un pare-feu peuvent également bloquer WebRTC.';
-const APP_BUILD = 'V9-20261128';
+const APP_BUILD = 'V10-20261128';
 let lastNetworkDiagnostic = '';
 $('copyDiag').onclick = e => copyTxt(e.currentTarget, lastNetworkDiagnostic);
 
@@ -999,13 +1005,22 @@ else {
   function showQR() {
     $('qr').innerHTML = qrSvg(location.origin + location.pathname + '#' + peerId);
     $('title').textContent = 'Scannez pour recevoir';
-    $('sub').textContent = 'Ouvrez l\'appareil photo de l\'autre téléphone.';
+    $('sub').textContent = 'Ouvrez l\'appareil photo de l\'autre téléphone. Plusieurs appareils peuvent scanner ce QR code.';
     show('qr'); keepAwake();
   }
   const allocateBandwidth = s => {
     const engines=[...s.recipients.values()].filter(r=>r.running&&r.transfer).map(r=>r.transfer);
+    if(!engines.length) return;
     const mobile=/Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
-    for(const engine of engines){engine.windowBytes=Math.max(524288,Math.floor((mobile?2:8)*1024*1024/engines.length));engine.maxBufferedBytes=Math.max(262144,Math.floor((mobile?1:4)*1024*1024/engines.length));if(engine.channel)engine.channel.bufferedAmountLowThreshold=Math.min(engine.maxBufferedBytes/2,524288);}
+    const totalWindow=(mobile?6:24)*1024*1024;
+    const totalBuffer=(mobile?2:8)*1024*1024;
+    const minWindow=mobile?786432:1572864;
+    const minBuffer=mobile?393216:786432;
+    for(const engine of engines){
+      engine.windowBytes=Math.max(minWindow,Math.floor(totalWindow/engines.length));
+      engine.maxBufferedBytes=Math.max(minBuffer,Math.floor(totalBuffer/engines.length));
+      if(engine.channel)engine.channel.bufferedAmountLowThreshold=Math.min(engine.maxBufferedBytes/2,1048576);
+    }
   };
   const updateRecipients = s => {
     if(s!==session || s.finished)return;
@@ -1059,7 +1074,7 @@ else {
         if(s.link!==null){c.send(JSON.stringify({type:'link',text:s.link}));await wait(receivedEnd,20000,'Aucune confirmation du lien.');}
         else {
           const hello=JSON.stringify({type:'manifest',share:s.id,files:s.items.map(x=>({name:x.file.name,size:x.file.size,mime:x.file.type}))});
-          transfer=new ReliableTransfer({windowBytes:1024*1024,maxBufferedBytes:512*1024,
+          transfer=new ReliableTransfer({windowBytes:4*1024*1024,maxBufferedBytes:2*1024*1024,
             validateIncoming:()=>false,onProgress:p=>{if(p.direction==='send'){r.bytes=r.base+p.transferred;updateRecipients(s);}},onError:()=>{}});
           transfer.attachChannel(c.dataChannel,c.peerConnection);r.transfer=transfer;allocateBandwidth(s);
           if(new TextEncoder().encode(hello).length > (c.peerConnection?.sctp?.maxMessageSize || 65536))throw Error('Liste de fichiers trop longue. Regroupez les fichiers ou envoyez-les en plusieurs fois.');
@@ -1093,13 +1108,13 @@ else {
   }
   async function startPcShare(en, root) {
     if (!(await setItems(en, root))) return;
-    openCode(code => { $('codeBig').textContent = spaced(code); $('title').textContent = 'Code de transfert'; $('sub').textContent = 'Saisissez le code sur l\'autre PC, ou utilisez « Copier le lien ».'; show('code'); keepAwake(); });
+    openCode(code => { $('codeBig').textContent = spaced(code); $('pcqr').innerHTML = qrSvg(pcLink()); $('title').textContent = 'Code de transfert'; $('sub').textContent = 'Saisissez le code sur l\'autre PC, partagez le lien, ou faites scanner le QR code.'; show('code'); keepAwake(); });
   }
   function startLinkShare(text) {
     linkText = text; items = null; makeSession();
     openCode(code => {
       $('lnk').textContent = text; $('lqr').innerHTML = qrSvg(pcLink()); $('lcodeBig').textContent = spaced(code);
-      $('title').textContent = 'Lien prêt'; $('sub').textContent = 'Scannez le QR code ou saisissez le code.'; show('lcode'); keepAwake();
+      $('title').textContent = 'Lien prêt'; $('sub').textContent = 'Scannez le QR code ou saisissez le code. Plusieurs appareils peuvent l'utiliser.'; show('lcode'); keepAwake();
     });
   }
   const cancelCode = () => {

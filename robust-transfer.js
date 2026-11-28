@@ -13,8 +13,8 @@ const ACK_INTERVAL = 256 * 1024;
 // Back-pressure adaptive: PCs can keep a wider window, phones stay conservative.
 const MOBILE_DEVICE = typeof navigator !== 'undefined' &&
   /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || '');
-const DEFAULT_WINDOW_SIZE = MOBILE_DEVICE ? 2 * 1024 * 1024 : 8 * 1024 * 1024;
-const DEFAULT_MAX_BUFFERED = MOBILE_DEVICE ? 1024 * 1024 : 4 * 1024 * 1024;
+const DEFAULT_WINDOW_SIZE = MOBILE_DEVICE ? 4 * 1024 * 1024 : 12 * 1024 * 1024;
+const DEFAULT_MAX_BUFFERED = MOBILE_DEVICE ? 2 * 1024 * 1024 : 6 * 1024 * 1024;
 const MEMORY_SINK_LIMIT = MOBILE_DEVICE ? 8 * 1024 * 1024 : 32 * 1024 * 1024;
 let opfsCleanupStarted = false;
 async function cleanupStaleOPFS(dir) {
@@ -208,7 +208,7 @@ export class ReliableTransfer {
     this.channel.binaryType = 'arraybuffer';
     this.chunkSize = Math.min(this.configuredChunkSize || DEFAULT_CHUNK_SIZE, 64 * 1024 - HEADER_SIZE);
     if (this.chunkSize < 1024) throw new Error('Taille des blocs invalide.');
-    channel.bufferedAmountLowThreshold = Math.min(this.maxBufferedBytes / 2, 512 * 1024);
+    channel.bufferedAmountLowThreshold = Math.min(this.maxBufferedBytes / 2, 1024 * 1024);
     const onMessage = e => {
       // Serialize asynchronous disk writes to preserve chunk order and ACK semantics.
       if (typeof e.data === 'string' && !e.data.startsWith(PREFIX)) return;
@@ -489,10 +489,11 @@ export async function defaultDownload(file) {
 /** Example WebRTC configuration for the existing pairing/signaling layer. */
 export const recommendedRTCConfig = Object.freeze({
   iceServers: [
-    { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }
+    { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302', 'stun:stun2.l.google.com:19302', 'stun:stun3.l.google.com:19302'] },
+    { urls: ['stun:stun.cloudflare.com:3478', 'stun:global.stun.twilio.com:3478'] }
   ],
   iceTransportPolicy: 'all',
-  iceCandidatePoolSize: 4
+  iceCandidatePoolSize: 6
 });
 
 /** If your signaling method transmits SDP only once, wait for ICE gathering. */
